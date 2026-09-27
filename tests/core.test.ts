@@ -10,7 +10,7 @@ import { referenceSchema, requireProfile, Store, visibleProfiles } from '../elec
 import { searchProfiles } from '../shared/search';
 import type { Browser, Profile } from '../shared/types';
 const folders: string[] = [];
-async function tmp() { const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chromatic-unit-')); folders.push(dir); return dir; }
+async function tmp() { const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'chromatic-unit-'))); folders.push(dir); return dir; }
 afterEach(async () => { vi.useRealTimers(); for (const dir of folders.splice(0)) await fs.rm(dir, { recursive: true, force: true }); });
 const chromium: Browser = { id: 'chrome', name: 'Chromium', executable: 'C:\\Browser\\chrome.exe', family: 'chromium', unpackedExtensions: true };
 const firefox: Browser = { ...chromium, id: 'firefox', name: 'Firefox', family: 'firefox', unpackedExtensions: false };
