@@ -49,6 +49,16 @@ typography:
     fontSize: "12px"
     fontWeight: 600
     lineHeight: 1.5
+  compact-body:
+    fontFamily: "Segoe UI, sans-serif"
+    fontSize: "13px"
+    fontWeight: 400
+    lineHeight: 1.5
+  compact-caption:
+    fontFamily: "Segoe UI, sans-serif"
+    fontSize: "11px"
+    fontWeight: 400
+    lineHeight: 1.5
 rounded:
   tag: "4px"
   compact-control: "6px"
@@ -104,17 +114,17 @@ components:
 
 **Creative North Star: "A compact Windows utility"**
 
-Chromatic is a Windows Electron application with a React-rendered interface. Its established direction is quiet and practical: warm neutral surfaces, ink typography, restrained violet selection, and Segoe UI. Density supports finding and launching a browser identity quickly. The manager and hotkey popup share identity cues and controls.
+Chromatic is a Windows Electron application with a React-rendered interface for Chromium browser profiles. Its established direction is quiet and practical: warm neutral surfaces, ink typography, restrained violet selection, and Segoe UI. Density supports finding and launching a browser identity quickly. The manager and hotkey popup share identity cues and controls.
 
 The library uses aligned rows, an unobtrusive navigation rail, and a focused editor at the right edge. Tonal separation carries ordinary hierarchy; shadows identify temporary layers. Preserve this native-feeling utility direction when extending the application.
 
 **Key Characteristics:**
 - Search-first navigation and visible keyboard focus.
 - Warm light neutrals and coordinated dark surfaces.
-- Aligned profile rows with initials, browser labels, and tags.
+- Aligned profile rows with initials, browser names, and multiple labels.
 - Restrained accent, compact controls, and a full-height side editor.
 
-The original identity asset is `assets/icon.svg`: a rounded dark square, open violet C, pale horizontal strokes, and a small green dot. Use this asset for the application identity; Lucide supplies interface icons. Reference captures of the built interface are `artifacts/manager-light.png`, `artifacts/manager-dark.png`, `artifacts/manager-compact.png`, `artifacts/editor-light.png`, `artifacts/launcher.png`, and `artifacts/slimming.png`.
+The original identity asset is `assets/icon.svg`: a rounded dark square, open violet C, pale horizontal strokes, and a small green dot. Use this asset for the application identity; Lucide supplies interface icons. Settled v0.2.0 reference captures are `artifacts/v2-labels.png`, `artifacts/v2-storage.png`, `artifacts/v2-proxy.png`, `artifacts/v2-duplicate.png`, `artifacts/v2-fork.png`, `artifacts/v2-diagnostics.png`, `artifacts/v2-dark.png`, and `artifacts/v2-compact.png`. Earlier `artifacts/launcher.png` and `artifacts/slimming.png` retain the established launcher and cleanup visual patterns.
 
 ## Colors
 
@@ -130,7 +140,7 @@ The frontmatter preserves the paired CSS colors from `src/theme.css`; each `ligh
 - **Soft Divider** (`line`), **Control Hover** (`hover`), **Row Hover** (`row-hover`), and **Quiet Tag** (`tag`) provide subtle structure and interaction feedback.
 
 ### Semantic colors
-- `gold` identifies favorites; `orange` distinguishes the Firefox browser mark.
+- `gold` identifies favorites. The retained `orange` token does not imply Firefox support; the current product is Chromium-only.
 - `green` and `green-bg` support local status and preservation/success messages. `error` and `error-bg` support failures and removal confirmation.
 - Profile colors are user-selectable identity cues from the six values in `src/main.tsx`; they tint initial avatars and are separate from global status colors.
 
@@ -142,13 +152,13 @@ The frontmatter preserves the paired CSS colors from `src/theme.css`; each `ligh
 **Body Font:** Segoe UI, sans-serif.
 **Label/Mono Font:** Keyboard hints inherit the same family; no separate mono family is introduced.
 
-The hierarchy is compact and familiar. The frontmatter records the recurring page headline, dialog title, section title, body, and label roles. Page headlines use restrained negative tracking. Supporting copy usually sits at 11-13px; keyboard hints use 11px. The launcher search is larger (21px) to establish immediate input focus. Paragraphs cap at 70ch where no narrower component limit applies.
+The hierarchy is compact and familiar. The frontmatter records the recurring page headline, dialog title, section title, body, and label roles, including the existing 13px compact-body and 11px compact-caption steps. Page headlines use restrained negative tracking. Group headings use the 13px step; storage headings and keyboard hints use 11px. These compact sizes belong to supporting utility content, while profile names remain prominent. The launcher search is larger (21px) to establish immediate input focus. Paragraphs cap at 70ch where no narrower component limit applies.
 
 ## Layout
 
-The manager fills the window with a fixed rail and a scrolling main region. The rail is 221px wide, the topbar 66px high, and the page has 38px horizontal padding with a 1500px maximum content width. Profile rows have a 91px minimum height and align selection, avatar, identity, tags, favorite, launch, and actions. They are divided by fine rules.
+The manager fills the window with a fixed rail and a scrolling main region. The rail is 221px wide, the topbar 66px high, and the page has 38px horizontal padding with a 1500px maximum content width. Profile rows have a 91px minimum height and align selection, avatar, identity, labels, favorite, launch, and actions. They are divided by fine rules. A filter/group/sort bar sits directly below search, with explicit labels for each select.
 
-At the existing 1020px breakpoint, the rail becomes 196px, page padding becomes 30px vertically and 25px horizontally, row gaps tighten, and tags and the topbar's trailing message disappear. This is the implemented compact desktop treatment; no mobile navigation is defined.
+At the existing 1020px breakpoint, the rail becomes 196px, page padding becomes 30px vertically and 25px horizontally, row gaps tighten, and the topbar's trailing message disappears. Labels remain visible: the matching label leads when filtering, followed by a compact +N count for additional labels. Filter/group/sort labels stack above their controls. This is the implemented compact desktop treatment; no mobile navigation is defined.
 
 The editor is a 580px right-side panel occupying full window height. Its body scrolls while its header and footer remain in the panel layout. Browser/type fields and paired checkboxes use a two-column grid with a 16px gap. The dimmed manager remains spatial context.
 
@@ -172,7 +182,7 @@ Primary actions use violet with paired on-accent text and compact semibold label
 
 ### Chips
 
-Tags are quiet, noninteractive metadata with muted ink and no border. The browser's system-default badge uses the accent-soft treatment. Tags never replace profile names or browser labels.
+Profile labels are quiet metadata chips with muted ink and no border. Rows show a leading label and a +N count when additional labels exist; filtering promotes the matching label so the visible row explains its inclusion. Editor chips expose removal controls with accessible labels. The browser's system-default badge uses the accent-soft treatment. Profile labels never replace profile names or browser names.
 
 ### Cards / Containers
 
@@ -184,17 +194,37 @@ Fields use surface fill, divider stroke, compact padding, and persistent labels.
 
 ### Navigation
 
-The left rail provides All profiles, Favorites, Recently used, Browsers, and Settings. Active navigation uses accent-soft fill, accent ink, semibold text, and `aria-current="page"`. The rail footer keeps discreet-profile access and the configured global launcher shortcut nearby.
+The left rail provides All profiles, Favorites, Recently used, Storage, Browsers, and Settings. Active navigation uses accent-soft fill, accent ink, semibold text, and `aria-current="page"`. The rail footer keeps discreet-profile access and the configured global launcher shortcut nearby.
 
 ### Profile editor
 
-Create and edit open the same modal side panel. Identity preview and color choice precede name, browser/type, tags, startup URLs, and favorite/hidden controls. Browser and type are fixed for existing registrations. Advanced browser/storage options are disclosed on demand. Cancel and Save/Create stay in the footer; removal has a separate confirmation explaining that browser data is kept.
+Create and edit open the same modal side panel. Identity preview and color choice precede name, browser/type, multiple labels, startup URLs, and favorite/hidden controls. Browser and type are fixed for existing registrations. Connection fields are grouped separately from advanced browser/storage options. Cancel and Save/Create stay in the footer; removal has a separate confirmation explaining that browser data is kept.
+
+### Labels and library organization
+
+Search covers profile names, labels, and browsers. Filter label, Group by, and Sort by use ordinary labeled selects rather than an opaque icon toolbar. The bar uses a 16px gap and top margin; its labels are 12px and selects have 7px padding. Group headings pair a label with its result count. Selection exposes bulk actions, including adding and removing labels across selected profiles. Keep the active filter and matching row labels visible while operating on groups or selections. The leading chip is capped at 105px, or 70px in compact mode, with ellipsis; title and accessible text retain the complete label list.
+
+### Duplicate and fork
+
+Both actions use a centered naming dialog with an explanation before the field and an explicit Create duplicate or Create fork footer action. Duplicate copies settings into a fresh profile; its copy states that cookies, logins, history, and other browser data are not copied. Fork copies settings and persistent browser data into an independent profile, requires closing the source browser first, and leaves disposable caches behind. Its copy acknowledges that some sites may require another sign-in. Preserve this distinction in action labels and feedback.
+
+### Authenticated proxy connection
+
+The editor's Connection section contains a proxy-mode select, a protocol/host/port row, and paired optional username/password fields. The address grid is 95px / flexible / 85px with 12px gaps. Fine top and bottom borders, 22px vertical padding, and a 15px heading separate the section. The password is masked, and supporting copy describes protection under the Windows account; a saved-secret indicator and explicit removal checkbox explain its current state. Test proxy is a separate action near the fields with cancellation and local IP, elapsed-time, timestamp, or inline-error feedback; it is distinct from saving the profile. Keep secret values out of ordinary status copy and diagnostic messages.
+
+### Storage overview
+
+Storage presents a divided, aligned list with a Scan storage action and sort control. The total-size heading explicitly says it includes cache; disposable cache is identified as an estimate, and each profile shows its Scanned time or Partial scan state. A summary and footnote distinguish profile totals from shared root files. Rows use 18px vertical padding, 12px supporting values, and 14px names. The grid is a flexible name column followed by 95px, 105px, and 120px columns with 15px gaps; compact mode uses 80px, 90px, and 115px trailing columns with 10px gaps. Review cleanup leads into the separate manual preview. Scanning reads sizes without changing browser data; the interface never treats scanning as cleanup.
+
+### Status and launch recovery
+
+Routine completion messages occupy the existing topbar and expire without adding a content row: ordinary success lasts six seconds and copy-ready feedback eight seconds. A completed new-profile operation exposes Open new profile there. Feedback uses a 14px gap, a 12px action, and single-line ellipsis with text capped at 520px or 370px in compact mode. Running, error, and cancelled operation feedback may occupy content space because it needs attention or a next action; settled success does not displace the library. Operation blocks use rail fill, 7px corners, 14px by 16px padding, 12px text, and a 6px accent progress track. Launch errors include a concrete Locate browser or Profile settings recovery action and a dismiss control. Retain actionable recovery beside its explanation instead of showing raw technical diagnostics alone.
 
 ### Hotkey launcher and keyboard access
 
 On launcher focus, search resets and receives focus. The search is a combobox controlling a listbox; the active result is exposed with `aria-activedescendant` and `aria-selected`. Up/Down moves the active result and scrolls it into view; Enter launches it. Escape dismisses the launcher after any open context menu is closed. Manage profiles opens the manager.
 
-Ctrl+K focuses search only when no editor, PIN, slimming, or discovery modal is open. Dialogs expose modal semantics, contain Tab/Shift+Tab focus, and restore prior focus when closed. Escape closes the current temporary layer. Keep visible focus on every actionable control and retain reduced-motion behavior.
+Ctrl+K focuses search only when no editor, PIN, Duplicate/Fork, bulk-label, slimming, or discovery modal is open. Dialogs expose modal semantics, contain Tab/Shift+Tab focus, and restore prior focus when closed. Escape closes the current temporary layer. Keep visible focus on every actionable control and retain reduced-motion behavior.
 
 ### PIN reveal
 

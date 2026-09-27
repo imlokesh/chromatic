@@ -17,6 +17,8 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      - run: node scripts/smoke.cjs
+      - run: node scripts/features-smoke.cjs
       - run: npm run package
       - uses: actions/upload-artifact@v4
         with:

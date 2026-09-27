@@ -1,67 +1,66 @@
 # Chromatic
 
-A Windows browser-profile launcher built from scratch with Electron, TypeScript, and React.
+A Windows launcher for Chromium-based browser profiles, built with Electron, TypeScript, and React.
 
 ![Chromatic icon](assets/icon.svg)
 
 ## Install
 
-Download **Chromatic Setup 0.1.0.exe** from this repository's Releases page. The repository and its binaries are private; sign in with an account that has access. Run the per-user installer. It registers `.chromatic` profile files and their **Open** and **Edit profile** Explorer actions. On Windows 11, Edit profile may be under **Show more options**.
+Download **Chromatic.Setup.0.2.0.exe** from the [private release page](https://github.com/imlokesh/chromatic/releases/tag/v0.2.0). Sign in with an account that has repository access. The per-user installer registers `.chromatic` references and their **Open** and **Edit profile** Explorer actions. On Windows 11, Edit profile may be under **Show more options**.
 
-This initial build is unsigned. Windows may show its publisher as unknown. There are no automatic updates; install a later release over the existing version. Uninstalling keeps profile data and app settings.
+The build is unsigned; Windows may show an unknown publisher. Install new releases over the existing version. There is no automatic updater. Uninstalling preserves browser data and app settings.
 
 ## Everyday use
 
-- Press **Ctrl+Alt+Space** to open the search launcher. Type a name, tag, or browser, use the arrow keys, and press Enter. Use the tray icon if the shortcut conflicts with another application.
-- Create an isolated profile, or use **Find existing** to register profiles already in your browsers. Manual folders are available under the editor's browser/storage options. Chromium expects the **User Data root** and a profile subfolder, such as `Default` or `Profile 1`.
-- Your system default browser is preselected for new profiles when supported. Existing profiles retain their original browser. Add nonstandard executable locations in **Browsers**.
-- Right-click a profile to edit, favorite, hide, export, or slim it. Exported `.chromatic` files contain a local ID, not browser data. They keep working after edits and renames, but aren't portable backups.
-- Set a four-digit PIN in **Settings** before hiding profiles. Hidden profiles never appear in the launcher. Reveal them explicitly in the manager; relocking clears the revealed state. Their exported files also require unlocking.
-- **Slim profile** previews eligible cache files. Close the relevant browser, review the preview, then clear cache. Multi-select profiles for batch export or slimming.
+- **Ctrl+Alt+Space** opens the quick launcher. Search names, labels, or browsers; use arrows and Enter. Hidden profiles never appear here.
+- Create an isolated profile or use **Find existing**. Manual Chromium folders use the **User Data root** plus a subfolder such as `Default` or `Profile 1`.
+- A supported system-default browser is preferred; otherwise the first detected Chromium browser is preselected. Chrome, Edge, Brave, and Chromium are detected at standard Windows locations. Add custom Chromium executables in **Browsers**.
+- Use multiple **labels**, filter by label, or group the manager by label. Profiles can appear in multiple groups; bulk actions count them once.
+- **Duplicate** copies settings into a fresh, empty browser profile. **Fork** copies settings and persistent browser data to an independent folder, excluding disposable caches. Both let you name the result. Hidden profiles remain hidden; favorites and recent-use history reset.
+- Fork requires the source browser closed, including background processes. It copies the selected profile and `Local State` encryption metadata, not sibling profile directories. Some browser-bound credentials or website sessions may require signing in again. Local extension folder references remain references.
+- **Storage** measures profile sizes and disposable cache without changing files. Total profile size includes cache. Root-level shared files are counted once; shared subdirectories are excluded. Partial scans are identified. Sizes can change while browsers run.
+- **Review cleanup** opens the cache preview. Close the relevant browser and explicitly confirm deletion. There is no automatic cleanup.
+- Action menus also offer edit, favorite, hide, export, and slim. Exported `.chromatic` files contain a stable local ID, not browser data or credentials.
+
+## Proxies
+
+The editor supports HTTP/HTTPS proxies with Basic authentication and SOCKS5 with optional username/password. Passwords are protected for the current Windows account using Electron `safeStorage` and omitted from snapshots, exports, browser arguments, and logs. Leaving a saved password field blank keeps it; use **Remove saved password** to clear it.
+
+Chromatic runs a loopback forwarding service for configured proxies. Keep it running in the tray while using proxied profiles. Quitting stops these connections; the app asks before doing so. Browser restart is required after settings change or interrupted forwarding. Profiles inside one shared User Data root cannot use conflicting proxy/launch settings in the same running instance; Duplicate creates an isolated alternative.
+
+**Test proxy** requests `https://api.ipify.org?format=json` through the same forwarding implementation and displays public IP, elapsed request time, and timestamp. Tests are manual, cancellable, and time out after 15 seconds. Failed upstream connections do not fall back to direct forwarding. TLS verification stays enabled; SOCKS5 destination hostnames are resolved upstream.
+
+This is a browser web proxy, not a system VPN. It does not promise to route every browser protocol or other applications' traffic. The loopback service is available to local processes while active. NTLM/Kerberos, PAC rules, and custom bypass lists are not included.
 
 ## Data and privacy
 
-Settings live at `%LOCALAPPDATA%\Chromatic\settings.json`. New managed browser profiles live under `%LOCALAPPDATA%\Chromatic\Profiles\<UUID>` unless another empty folder is chosen. Existing browser profiles remain in place.
+Settings live at `%LOCALAPPDATA%\Chromatic\settings.json`; managed profiles normally live under `%LOCALAPPDATA%\Chromatic\Profiles\<UUID>`. Existing profiles stay in place. Removing a registration never deletes browser data.
 
-Slimming removes only verified Chromium disk/code/GPU caches or Firefox HTTP/startup caches. Cookies, credentials, key material, sessions, bookmarks, history, extensions, preferences, local storage, IndexedDB, service workers, and offline site data are preserved. It does not compact databases or promise better browsing speed: caches rebuild and first loads may be slower. Websites and browsers can still expire their own sessions.
+Upgrading from 0.1 preserves `settings.v1.backup.json`, migrates tags to labels, and archives Firefox registrations in `archived-firefox.json`. Firefox is no longer supported; its browser data is untouched. Unsupported old proxy strings are kept for review rather than silently changing routing.
 
-Cleanup is intentionally conservative: it skips uncertain running states, junctions/symlinks, changed files, locked files, and unknown layouts. All processes using the relevant browser executable must be closed for cleanup, including its background mode. No automatic cleanup or recursive profile deletion is implemented.
+Slimming only removes verified Chromium disk/code/GPU caches. Cookies, credentials, keys, sessions, bookmarks, history, extensions, preferences, local storage, IndexedDB, service workers, and offline site storage are preserved. Cleanup skips linked, changed, locked, or uncertain files. All processes matching the browser executable name must be closed. Caches rebuild; slimming does not guarantee better browsing speed or indefinite website sessions.
 
-The PIN gates access **inside Chromatic**. Its salted verifier is protected by Windows DPAPI, with persistent retry delays. It does not encrypt profile names, paths, or browser data or stop someone using the same Windows account from accessing files or launching the browser directly. There is no PIN recovery. Back up browser data with the browser closed if you need disaster recovery.
+The PIN gates access **inside Chromatic**. Hidden profiles require unlocking for launch, editing, exporting, copying, labels, and storage operations. Locking cancels unfinished private operations and clears private UI state. The PIN does not encrypt browser data or prevent direct filesystem access by the same Windows user. There is no PIN recovery.
 
-Removing a profile registration never deletes its browser data. Changing browser family requires a separate profile; Chromium and Firefox data formats aren't interchangeable.
+## Development and verification
 
-## Browser capabilities
+Windows x64, Node.js 22+, npm, and Git are required.
 
-| Capability | Chromium family | Firefox |
-| --- | --- | --- |
-| Discover existing profiles | Chrome, Edge, Brave, Chromium standard installations | Standard `profiles.ini` installations |
-| Manual executable/profile folders | Yes | Yes |
-| Isolated profiles and startup URLs | Yes | Yes |
-| Proxy configuration | Browser launch argument | Managed profile `user.js`; existing profiles use browser settings |
-| Unpacked extension launch flag | Generic detected Chromium only | No; use Firefox's add-on manager |
-| Repeated launches | Browser handles routing | An already-running isolated profile must be closed first |
-
-Browser versions and extension restrictions differ. Chrome-branded builds no longer support the unpacked extension launch flag; use their extension manager. Custom arguments are one argument per line; profile-routing, proxy, remote-debugging, and extension flags are reserved.
-
-## Development
-
-Requires Windows x64, Node.js 22+, npm, and Git.
-
-```powershell
+```text
 npm ci
-npm run dev:app
 npm test
-npm run test:smoke
+npm run build
+node scripts/smoke.cjs
+node scripts/features-smoke.cjs
+node scripts/fork-browser-smoke.cjs
+node scripts/proxy-live-smoke.cjs
 npm run package
 ```
 
-`npm run dev` serves the renderer only; desktop features require Electron. `npm run dev:app` builds and launches Electron. The installer is written to `release/`. Smoke tests use disposable data under Windows Temp and leave screenshots in `artifacts/`; they never clean real browser profiles. The smoke test hotkey is Ctrl+Alt+F11.
+Electron/browser tests use disposable profiles, never real user data. The live proxy test contacts ipify through a local authenticated fixture; other proxy tests use local servers. `tests/localhost-{cert,key}.pem` are public self-signed localhost test fixtures, not production credentials. Screenshots go in ignored `artifacts/`. Set `CHROMATIC_SMOKE_EXE` to an installed executable to test that package with the Electron smoke scripts.
 
-Architecture: `electron/` owns Windows integration, validated IPC, persistence, browser adapters, PIN enforcement, and cache cleanup. `shared/` contains serializable types and search logic. `src/` contains the sandboxed React renderer. The app loads only packaged local content, with no renderer Node access or unrestricted shell IPC.
+`npm run dev:app` builds and launches Electron; `npm run dev` serves only the renderer. Installers go under `release/`. Windows CI runs unit tests, builds, exercises both Electron smoke scripts, and packages installer artifacts.
 
-## Release process
+`electron/` owns validated IPC, persistence, Windows integration, copy/cleanup safety, proxy services, and diagnostics. `shared/` defines serializable interfaces and search. `src/` is a sandboxed React renderer with no Node access. New operations are cancellable and use profile IDs across IPC.
 
-Save changes in Git, run unit and Electron smoke tests, then package the Windows installer. Publish a private GitHub release containing the installer, its `.blockmap`, and `SHA256SUMS.txt`. The Windows workflow can also build and retain an installer artifact on demand. Code signing and automatic updates are intentionally not configured for this first release.
-
-The SVG icon in `assets/icon.svg` was authored for this project. Its Windows ICO and tray PNG are derived assets, not downloaded branding.
+Releases contain the installer, blockmap, and SHA256 checksums. Signing, automatic updates, userscripts, managed browser downloads, cloud sync, workspaces, and backup/restore are not included. The SVG icon is original project artwork.

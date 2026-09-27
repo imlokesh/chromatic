@@ -1,8 +1,18 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-09-27T15:38:06.420352+00:00",
+  "generatedAt": "2026-09-27T17:56:11.266Z",
   "title": "Design System: Chromatic",
   "extensions": {
+    "typographyMeta": {
+      "compact-body": {
+        "displayName": "Compact body",
+        "purpose": "Existing 13px utility copy and group-heading step."
+      },
+      "compact-caption": {
+        "displayName": "Compact caption",
+        "purpose": "Existing 11px supporting captions, keyboard hints, and storage headings."
+      }
+    },
     "colorMeta": {
       "canvas": {
         "displayName": "Canvas",
@@ -299,6 +309,20 @@
   },
   "components": [
     {
+      "name": "Label filter",
+      "kind": "custom",
+      "description": "One control from the implemented filter, group, and sort bar; stacks its label above the select in compact mode.",
+      "html": "<label class=\"ds-view-control\">Filter label<select class=\"ds-view-select\"><option>All labels</option><option>testing</option></select></label>",
+      "css": ".ds-view-control{display:flex;align-items:center;gap:8px;font:400 12px/1.5 Segoe UI,sans-serif;color:var(--ink,#292933)}.ds-view-select{padding:7px;border:1px solid var(--line,#e4e2df);border-radius:7px;background:var(--surface,#fff);color:var(--ink,#292933);font:400 12px/1.5 Segoe UI,sans-serif}.ds-view-select:hover{border-color:var(--line,#e4e2df)}.ds-view-select:focus-visible{outline:2px solid var(--accent,#6853aa);outline-offset:3px}@media(max-width:1020px){.ds-view-control{flex-direction:column;align-items:stretch}}"
+    },
+    {
+      "name": "Storage row",
+      "kind": "custom",
+      "description": "Profile name and scan time, total size including cache, estimated disposable cache, and explicit cleanup review.",
+      "html": "<div class=\"ds-storage-row\"><div><strong class=\"ds-storage-name\">Work</strong><small class=\"ds-storage-time\">Scanned 11:19 PM</small></div><span>24 MB</span><span>3 MB</span><button class=\"ds-storage-action\">Review cleanup</button></div>",
+      "css": ".ds-storage-row{display:grid;grid-template-columns:minmax(100px,1fr) 95px 105px 120px;gap:15px;align-items:center;padding:18px 0;border-bottom:1px solid var(--line,#e4e2df);color:var(--ink,#292933);font:400 12px/1.5 Segoe UI,sans-serif}.ds-storage-name{font-size:14px;font-weight:600}.ds-storage-time{display:block;color:var(--muted,#72717b);font-size:11px}.ds-storage-action{padding:7px;border:0;background:transparent;color:var(--accent,#6853aa);font:400 12px/1.5 Segoe UI,sans-serif;cursor:pointer}.ds-storage-action:hover{color:var(--accent,#6853aa)}.ds-storage-action:focus-visible{outline:2px solid var(--accent,#6853aa);outline-offset:3px}@media(max-width:1020px){.ds-storage-row{grid-template-columns:minmax(95px,1fr) 80px 90px 115px;gap:10px}}"
+    },
+    {
       "name": "Primary button",
       "kind": "button",
       "refersTo": "button-primary",
@@ -342,7 +366,7 @@
       "name": "Metadata tag",
       "kind": "chip",
       "refersTo": "tag",
-      "description": "Noninteractive profile metadata.",
+      "description": "Noninteractive profile-label metadata. Library rows show the matching label and an additional-label count; editor removal is a separate action.",
       "html": "<span class=\"ds-tag\">work</span>",
       "css": ".ds-tag{display:inline-flex;white-space:nowrap;border-radius:4px;padding:3px 8px;font:400 10px/1.5 Segoe UI,sans-serif;background:var(--tag,#eeece8);color:var(--muted,#72717b)}"
     },
@@ -357,11 +381,11 @@
   ],
   "narrative": {
     "northStar": "A compact Windows utility",
-    "overview": "Chromatic is a Windows Electron application with a React-rendered interface. Its established direction is quiet and practical: warm neutral surfaces, ink typography, restrained violet selection, and Segoe UI. Density supports finding and launching a browser identity quickly. The manager and hotkey popup share identity cues and controls.\n\nThe library uses aligned rows, an unobtrusive navigation rail, and a focused editor at the right edge. Tonal separation carries ordinary hierarchy; shadows identify temporary layers. Preserve this native-feeling utility direction when extending the application.",
+    "overview": "Chromatic is a Windows Electron application with a React-rendered interface for Chromium browser profiles. Its established direction is quiet and practical: warm neutral surfaces, ink typography, restrained violet selection, and Segoe UI. Density supports finding and launching a browser identity quickly. The manager and hotkey popup share identity cues and controls.\n\nThe library uses aligned rows, an unobtrusive navigation rail, and a focused editor at the right edge. Tonal separation carries ordinary hierarchy; shadows identify temporary layers. Preserve this native-feeling utility direction when extending the application.",
     "keyCharacteristics": [
       "Search-first navigation and visible keyboard focus.",
       "Warm light neutrals and coordinated dark surfaces.",
-      "Aligned profile rows with initials, browser labels, and tags.",
+      "Aligned profile rows with initials, browser names, and multiple labels.",
       "Restrained accent, compact controls, and a full-height side editor."
     ],
     "rules": [

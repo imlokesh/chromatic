@@ -1,23 +1,17 @@
-# Chromatic 0.1.0
+# Chromatic 0.2.0
 
-First private Windows release, built from scratch.
+- **Duplicate** copies settings into a fresh browser profile; **Fork** also copies persistent browser data, excluding disposable caches. Forks show progress and support cancellation.
+- **Labels** replace tags, with filters, grouping, autocomplete, and bulk editing. Profiles in multiple groups are counted once for batch actions.
+- **Storage** shows total profile size and disposable-cache estimates, with a separate cleanup review.
+- **Proxies** support HTTP/HTTPS Basic authentication and SOCKS5 credentials, Windows-protected passwords, and manual public-IP tests. Keep Chromatic running in the tray for proxy connections.
+- **Launch recovery** explains missing browser executables, unavailable folders, and restarts needed for changed settings.
+- **Chromium-only:** Chrome, Edge, Brave, Chromium, and custom Chromium executables. Upgrades preserve the old configuration and archive Firefox registrations without deleting browser data.
+- Improved compact layouts, keyboard menus, progress feedback, dark theme, and discreet-profile checks.
 
-- Search and launch browser profiles from a configurable global-hotkey popup.
-- Create isolated profiles or discover existing Chrome, Edge, Brave, Chromium, and Firefox profiles.
-- Organize with favorites, tags, startup URLs, and browser-specific settings.
-- Export `.chromatic` local profile references with Explorer Open and Edit profile actions.
-- Keep discreet profiles out of the launcher and require a four-digit PIN for app access.
-- Preview and remove disposable cache files while preserving cookies, logins, sessions, and website data.
-- Original Chromatic SVG/Windows icon; system, light, and dark themes.
+## Install
 
-## Download
+Download `Chromatic.Setup.0.2.0.exe` and optionally verify it against `SHA256SUMS.txt`. Repository access is required. Install over 0.1.0 to upgrade; profile references and browser data remain in place.
 
-Download **Chromatic Setup 0.1.0.exe** below and run the per-user installer. The `.blockmap` is release metadata; it isn't required for manual installation. `SHA256SUMS.txt` provides integrity checks.
+Fork with the source browser closed. Browser encryption and website session rules can require signing in again after a successful copy. Slimming preserves persistent data but does not guarantee indefinite sessions. Browser proxies are not a system VPN.
 
-This initial release is unsigned, so Windows may display an unknown-publisher prompt. Releases and binaries are private and require repository access. Automatic updates are not configured.
-
-## Validation
-
-25 automated core tests passed, along with development and installed-app smoke tests, isolated launch checks for Chrome/Edge/Firefox, and install/uninstall file-association checks. The dependency audit reported zero known vulnerabilities. See `VERIFICATION.md` for scope and limits.
-
-The PIN is an app access gate, not encryption. Slimming never deletes persistent site data, but websites and browsers can still expire sessions independently.
+The build is unsigned. Automatic updates and userscripts are not included. The PIN controls access through Chromatic, not direct filesystem access. See `VERIFICATION.md` for validation details.
