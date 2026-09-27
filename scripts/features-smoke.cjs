@@ -1,0 +1,53 @@
+const { _electron: electron, expect } = require('@playwright/test');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const os = require('node:os');
+const crypto = require('node:crypto');
+(async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'chromatic-features-')));
+  const root = path.join(temp, 'Chromatic'); await fs.mkdir(root);
+  const profiles = ['Studio', 'Research', 'Personal'].map((name, i) => ({ id: crypto.randomUUID(), name, browserId: 'fixture', kind: 'managed', dataDir: path.join(temp, `profile-${i}`), labels: [['work', 'design'], ['work', 'reading'], []][i], color: '#8070c6', favorite: i === 0, hidden: false, urls: [], flags: [], extensions: [], proxy: { mode: 'system', protocol: 'http', host: '', port: 8080, username: '' }, noDefaultFlags: false, createdAt: Date.now() }));
+  for (const p of profiles) { await fs.mkdir(path.join(p.dataDir, 'Default', 'Cache'), { recursive: true }); await fs.writeFile(path.join(p.dataDir, 'Default', 'Cookies'), 'persistent-test-data'); await fs.writeFile(path.join(p.dataDir, 'Default', 'Cache', 'data'), Buffer.alloc(8000)); }
+  await fs.writeFile(path.join(root, 'settings.json'), JSON.stringify({ version: 2, profiles, browsers: [{ id: 'fixture', name: 'Chromium fixture', executable: 'C:\\Chromatic-test\\fixture.exe', family: 'chromium', unpackedExtensions: true }], settings: { hotkey: 'Ctrl+Alt+F10', startup: false, theme: 'light', defaultFlags: { chromium: [] }, groupBy: 'none', sortBy: 'favorites' }, attempts: 0, blockedUntil: 0, proxySecrets: {} }));
+  const env = { ...process.env, LOCALAPPDATA: temp }; delete env.ELECTRON_RUN_AS_NODE;
+  const app = await electron.launch({ ...(process.env.CHROMATIC_SMOKE_EXE ? { executablePath: process.env.CHROMATIC_SMOKE_EXE, args: [] } : { args: [path.resolve('.')] }), env });
+  try {
+    const page = await app.firstWindow(); const errors = []; page.on('pageerror', e => errors.push(e.message));
+    await expect(page.locator('.profile-row')).toHaveCount(3);
+    await page.getByLabel('Group by').selectOption('label'); await expect(page.locator('.profile-row')).toHaveCount(5);
+    await expect(page.locator('.group-heading')).toHaveCount(4);
+    await page.getByRole('button', { name: 'Select all', exact: true }).click(); await expect(page.locator('.list-heading')).toContainText('3 selected');
+    await page.getByRole('button', { name: 'Labels', exact: true }).click(); await page.getByLabel('Add label', { exact: true }).fill('testing'); await page.getByLabel('Add label', { exact: true }).press('Enter'); await page.getByRole('button', { name: 'Apply labels' }).click();
+    await page.getByRole('button', { name: 'Clear', exact: true }).click();
+    await page.getByLabel('Filter label').selectOption('testing'); await expect(page.locator('.list-heading')).toContainText('3 profiles');
+    await fs.mkdir('artifacts', { recursive: true }); await page.waitForTimeout(250); await page.screenshot({ path: 'artifacts/v2-labels.png' });
+    await page.getByLabel('Group by').selectOption('none'); await page.getByLabel('Filter label').selectOption('');
+    await page.getByRole('button', { name: 'Actions for Studio', exact: true }).click(); await page.getByRole('menuitem', { name: 'Duplicate…', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: 'Duplicate profile' })).toContainText('not copied'); await page.waitForTimeout(250); await page.screenshot({ path: 'artifacts/v2-duplicate.png' });
+    await page.getByRole('button', { name: 'Create duplicate' }).click(); await expect(page.locator('.profile-row')).toHaveCount(4);
+    let state = await page.evaluate(() => window.chromatic.snapshot()); const copy = state.profiles.find(p => p.name.includes('Copy'));
+    if (!copy || copy.dataDir === profiles[0].dataDir || await fs.access(path.join(copy.dataDir, 'Default', 'Cookies')).then(() => true, () => false)) throw new Error('Duplicate copied browser data');
+    await page.getByRole('button', { name: 'Actions for Studio', exact: true }).click(); await page.getByRole('menuitem', { name: 'Fork…', exact: true }).click(); await page.waitForTimeout(250); await page.screenshot({ path: 'artifacts/v2-fork.png' }); await page.getByRole('button', { name: 'Create fork' }).click();
+    await expect(page.locator('.profile-row')).toHaveCount(5, { timeout: 30000 });
+    state = await page.evaluate(() => window.chromatic.snapshot()); const fork = state.profiles.find(p => p.name.includes('Fork'));
+    if (await fs.readFile(path.join(fork.dataDir, 'Default', 'Cookies'), 'utf8') !== 'persistent-test-data') throw new Error('Fork lost cookies');
+    if (await fs.access(path.join(fork.dataDir, 'Default', 'Cache')).then(() => true, () => false)) throw new Error('Fork copied cache');
+    await page.getByRole('button', { name: 'Storage', exact: true }).click(); await page.getByRole('button', { name: 'Scan storage', exact: true }).click();
+    await expect(page.locator('.storage-row').filter({ hasText: 'Not measured' })).toHaveCount(0); await expect(page.locator('.storage-toolbar')).toContainText('KB'); await page.waitForTimeout(250); await page.screenshot({ path: 'artifacts/v2-storage.png' });
+    await page.getByRole('button', { name: 'All profiles', exact: false }).click();
+    await page.getByRole('button', { name: 'Actions for Personal', exact: true }).click(); await page.getByRole('menuitem', { name: 'Edit profile', exact: true }).click();
+    await page.getByLabel('Proxy mode').selectOption('server'); await page.getByLabel('Host', { exact: true }).fill('127.0.0.1'); await page.getByLabel('Port', { exact: true }).fill('9'); await page.getByLabel('Username', { exact: false }).fill('demo'); await page.locator('input[type=password]').fill('smoke-secret');
+    await page.getByRole('button', { name: 'Test proxy', exact: true }).click(); await expect(page.getByRole('button', { name: 'Testing connection…' })).toHaveCount(0, { timeout: 20000 });
+    await expect(page.getByRole('dialog').locator('.inline-error')).toBeVisible(); await page.waitForTimeout(250); await page.screenshot({ path: 'artifacts/v2-proxy.png' });
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    const config = await fs.readFile(path.join(root, 'settings.json'), 'utf8'); if (config.includes('smoke-secret')) throw new Error('Plaintext proxy credential persisted');
+    state = await page.evaluate(() => window.chromatic.snapshot()); if (JSON.stringify(state).includes('smoke-secret')) throw new Error('Secret exposed in snapshot');
+    await page.getByRole('button', { name: 'Actions for Personal', exact: true }).click(); await page.getByRole('menuitem', { name: 'Edit profile', exact: true }).click(); await expect(page.locator('input[type=password]')).toHaveValue(''); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await page.locator('.profile-row').filter({ hasText: 'Personal' }).getByRole('button', { name: 'Launch', exact: true }).click(); await expect(page.getByRole('button', { name: 'Locate browser', exact: true })).toBeVisible();
+    await page.waitForTimeout(250); await page.screenshot({ path: 'artifacts/v2-diagnostics.png' }); await page.getByRole('button', { name: 'Dismiss error' }).click();
+    await page.evaluate(async () => { const s = await window.chromatic.snapshot(); await window.chromatic.settings({ ...s.settings, theme: 'dark' }); }); await page.waitForFunction(() => document.documentElement.style.colorScheme === 'dark'); await page.waitForTimeout(250); await page.screenshot({ path: 'artifacts/v2-dark.png' });
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(900, 660)); await page.waitForTimeout(150); await page.waitForTimeout(250); await page.screenshot({ path: 'artifacts/v2-compact.png' });
+    if (errors.length) throw new Error(errors.join('\n'));
+    console.log('PASS: grouping, deduplicated selections, bulk labels, fresh duplicate, persistent-data fork, cache exclusion, storage, proxy test error, protected password, launch recovery, themes and compact UI.');
+  } finally { await app.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });

@@ -7,7 +7,7 @@ export function searchProfiles(profiles: Profile[], query: string, browserNames:
     if (name === q) return 1000;
     if (name.startsWith(q)) return 800;
     if (name.includes(q)) return 600;
-    const text = [name, ...p.tags, browserNames[p.browserId] || ''].join(' ').toLocaleLowerCase();
+    const text = [name, ...p.labels, browserNames[p.browserId] || ''].join(' ').toLocaleLowerCase();
     if (q.split(/\s+/).every(word => text.includes(word))) return 400;
     let at = 0;
     for (const char of text) if (char === q[at]) at++;

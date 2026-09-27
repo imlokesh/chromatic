@@ -1,6 +1,6 @@
 {
   "name": "chromatic-launcher",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A quiet home for every browser profile",
   "author": "Chromatic",
   "private": true,
@@ -15,7 +15,9 @@
     "test:smoke": "npm run build && node scripts/smoke.cjs"
   },
   "dependencies": {
+    "https-proxy-agent": "^7.0.6",
     "lucide-react": "^0.468.0",
+    "proxy-chain": "^3.0.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zod": "^3.24.0"

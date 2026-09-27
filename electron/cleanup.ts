@@ -6,10 +6,6 @@ import { processes } from './windows';
 
 export function cacheTargets(profile: Profile, browser: Browser) {
   if (!path.isAbsolute(profile.dataDir)) throw new Error('Profile data path must be absolute.');
-  if (browser.family === 'firefox') {
-    const root = profile.cacheRoot || profile.dataDir;
-    return [{ root, relative: 'cache2', label: 'HTTP cache' }, { root, relative: 'startupCache', label: 'Startup cache' }];
-  }
   const dir = profile.profileDir || 'Default';
   if (dir === '..' || dir === '.' || /[\\/:]/.test(dir)) throw new Error('Invalid Chromium profile directory.');
   const root = path.join(profile.dataDir, dir);
