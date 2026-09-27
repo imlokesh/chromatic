@@ -83,6 +83,7 @@ async function launch(id: string) {
       await fs.writeFile(userJs, `${clean}\n// BEGIN CHROMATIC\n${firefoxProxyPrefs(p.proxy)}\n// END CHROMATIC\n`);
     }
   }
+  profile(id); // Recheck a hidden profile after asynchronous filesystem/process checks.
   await new Promise<void>((resolve, reject) => {
     const child = spawn(b.executable, args, { detached: true, stdio: 'ignore', windowsHide: false, shell: false });
     let timer: ReturnType<typeof setTimeout>;
@@ -115,6 +116,8 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
     return result;
   }
   if (method === 'launch') return launch(uuid.parse(args[0]));
+  if (method === 'launcher') { showLauncher(); return; }
+  if (method === 'clearPending') { pending = undefined; return; }
   if (method === 'manager') { launcher?.hide(); showManager(args[0] ? uuid.parse(args[0]) : undefined); return; }
   if (method === 'dismiss') { if (isLauncher) launcher?.hide(); else { pending = undefined; manager?.hide(); lock(); } return; }
   if (method === 'lock') { pending = undefined; lock(); return; }
@@ -180,10 +183,11 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
     }
     return count;
   }
-  if (method === 'previewSlim') { const profiles = idsSchema.parse(args[0]).map(id => profile(id)); const previews = []; for (const p of profiles) previews.push(await cleaner.preview(p, browserFor(p))); return previews; }
+  if (method === 'previewSlim') { const profiles = idsSchema.parse(args[0]).map(id => profile(id)); const previews = []; for (const p of profiles) previews.push(await cleaner.preview(p, browserFor(p))); for (const p of profiles) profile(p.id); return previews; }
   if (method === 'clean') {
-    const tokens = idsSchema.parse(args[0]); const results = [];
-    for (const token of tokens) { const id = cleaner.profileForToken(token); if (!id) throw new Error('Scan this profile again before cleanup.'); profile(id); results.push(await cleaner.clean(token)); }
+    const tokens = idsSchema.parse(args[0]); const results = []; const checkedIds: string[] = [];
+    for (const token of tokens) { const id = cleaner.profileForToken(token); if (!id) throw new Error('Scan this profile again before cleanup.'); profile(id); checkedIds.push(id); results.push(await cleaner.clean(token)); }
+    for (const id of checkedIds) profile(id);
     return results;
   }
   if (method === 'settings') {

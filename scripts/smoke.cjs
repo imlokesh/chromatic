@@ -9,7 +9,7 @@ const crypto = require('node:crypto');
   const profiles = ['Studio', 'Personal', 'Research', 'Side project'].map((name, i) => ({ id: crypto.randomUUID(), name, browserId: 'test-chrome', kind: 'managed', dataDir: path.join(temp, `profile-${i}`), tags: [['work', 'design'], ['everyday'], ['reading'], ['weekends']][i], color: ['#8070c6', '#4e8a76', '#668eae', '#b8784b'][i], favorite: i < 2, hidden: false, urls: [], flags: [], extensions: [], proxy: '', noDefaultFlags: false, createdAt: Date.now() }));
   await fs.writeFile(path.join(appRoot, 'settings.json'), JSON.stringify({ version: 1, profiles, browsers: [{ id: 'test-chrome', name: 'Chromium (test fixture)', executable: 'C:\\Chromatic-test\\chrome.exe', family: 'chromium', unpackedExtensions: true }], settings: { hotkey: 'Ctrl+Alt+F11', startup: false, theme: 'light', defaultFlags: { chromium: [], firefox: [] } }, attempts: 0, blockedUntil: 0 }));
   const errors = []; const env = { ...process.env, LOCALAPPDATA: temp }; delete env.ELECTRON_RUN_AS_NODE;
-  const app = await electron.launch({ args: [path.resolve('.')], env });
+  const app = await electron.launch({ ...(process.env.CHROMATIC_SMOKE_EXE ? { executablePath: process.env.CHROMATIC_SMOKE_EXE, args: [] } : { args: [path.resolve('.')] }), env });
   try {
     const page = await app.firstWindow(); page.on('pageerror', e => errors.push(e.message));
     await expect(page.getByRole('heading', { name: 'Your profiles', exact: true })).toBeVisible();
@@ -30,11 +30,35 @@ const crypto = require('node:crypto');
     const gated = await page.evaluate(async id => { try { await window.chromatic.launch(id); return false; } catch { return true; } }, profiles[0].id); if (!gated) throw new Error('Hidden launch bypassed PIN');
     await page.getByRole('button', { name: 'Show hidden profiles' }).click(); await page.getByLabel('Four-digit PIN', { exact: true }).fill('4826'); await page.getByRole('button', { name: 'Unlock profiles', exact: true }).click(); await expect(page.locator('.profile-row')).toHaveCount(5);
     await page.getByRole('button', { name: 'Actions for Personal' }).click(); await page.getByRole('menuitem', { name: 'Edit profile', exact: true }).click(); await expect(page.getByRole('dialog', { name: 'Edit profile' })).toBeVisible();
-    await page.screenshot({ path: 'artifacts/editor-light.png' }); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-    await app.evaluate(({ nativeTheme }) => { nativeTheme.themeSource = 'dark'; }); await page.screenshot({ path: 'artifacts/manager-dark.png' });
-    await app.evaluate(({ nativeTheme, BrowserWindow }) => { nativeTheme.themeSource = 'light'; BrowserWindow.getAllWindows()[0].setSize(900, 660); }); await page.screenshot({ path: 'artifacts/manager-compact.png' });
-    await page.getByRole('button', { name: 'Actions for Personal' }).click(); await page.getByRole('menuitem', { name: 'Slim profile…' }).click(); await expect(page.getByRole('dialog', { name: 'Make a little room' })).toBeVisible(); await page.screenshot({ path: 'artifacts/slimming.png' }); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await page.getByLabel('Profile name', { exact: true }).focus(); await page.keyboard.press('Control+k'); if (!await page.evaluate(() => !!document.activeElement.closest('[role=dialog]'))) throw new Error('Modal focus escaped'); await page.waitForTimeout(250); await page.screenshot({ path: 'artifacts/editor-light.png' }); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await page.evaluate(async () => { const s = await window.chromatic.snapshot(); await window.chromatic.settings({ ...s.settings, theme: 'dark' }); }); await page.waitForFunction(() => document.documentElement.style.colorScheme === 'dark'); await page.waitForTimeout(150); await page.screenshot({ path: 'artifacts/manager-dark.png' });
+    await page.evaluate(async () => { const s = await window.chromatic.snapshot(); await window.chromatic.settings({ ...s.settings, theme: 'light' }); }); await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(900, 660); }); await page.waitForTimeout(200); await page.screenshot({ path: 'artifacts/manager-compact.png' });
+    await page.getByRole('button', { name: 'Actions for Personal' }).click(); await page.getByRole('menuitem', { name: 'Slim profile…' }).click(); await expect(page.getByRole('dialog', { name: 'Make a little room' })).toBeVisible(); await page.waitForTimeout(250); await page.screenshot({ path: 'artifacts/slimming.png' }); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+    const exportDir = path.join(temp, 'exports'); await fs.mkdir(exportDir);
+    await app.evaluate(({ dialog }, dir) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [dir] }); }, exportDir);
+    await page.evaluate(async id => window.chromatic.exportProfiles([id]), profiles[0].id);
+    const exported = path.join(exportDir, (await fs.readdir(exportDir))[0]);
+    if (!exported.includes('Profile-')) throw new Error('Hidden export filename disclosed profile name');
+    await page.evaluate(() => window.chromatic.lock());
+    await require('node:util').promisify(require('node:child_process').execFile)(process.env.CHROMATIC_SMOKE_EXE || require('electron'), [...(process.env.CHROMATIC_SMOKE_EXE ? [] : [path.resolve('.')]), '--edit', exported], { env, windowsHide: true, timeout: 15000 });
+    await expect(page.getByRole('dialog', { name: 'Unlock discreet profiles' })).toBeVisible();
+    await page.getByLabel('Four-digit PIN', { exact: true }).fill('4826'); await page.getByRole('button', { name: 'Unlock profiles', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: 'Edit profile' })).toBeVisible(); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    const quickWindowPromise = app.waitForEvent('window'); await page.evaluate(() => window.chromatic.launcher()); const quickPage = await quickWindowPromise;
+    await expect(quickPage.locator('.quick-row')).toHaveCount(4);
+    if ((await quickPage.locator('.quick-list').innerText()).includes('Studio')) throw new Error('Hidden profile leaked into quick launcher');
+    await quickPage.screenshot({ path: 'artifacts/launcher.png' }); await quickPage.getByRole('combobox', { name: 'Search profiles' }).fill('reading'); await expect(quickPage.locator('.quick-row')).toHaveCount(1);
+    await quickPage.getByRole('combobox', { name: 'Search profiles' }).fill('');
+    await page.evaluate(async template => { for (let i = 0; i < 12; i++) { const { id, createdAt, ...draft } = template; await window.chromatic.save({ ...draft, name: `Overflow test ${i}`, dataDir: '', favorite: false }); } }, profiles[1]);
+    await expect(quickPage.locator('.quick-row')).toHaveCount(16);
+    await quickPage.getByRole('combobox', { name: 'Search profiles' }).focus(); for (let i = 0; i < 14; i++) await quickPage.keyboard.press('ArrowDown');
+    await quickPage.waitForTimeout(100);
+    const inView = await quickPage.evaluate(() => { const a = document.querySelector('.quick-row.active').getBoundingClientRect(); const b = document.querySelector('.quick-list').getBoundingClientRect(); return a.top >= b.top && a.bottom <= b.bottom + 1; });
+    if (!inView) throw new Error('Keyboard selection scrolled out of viewport');
+    await quickPage.evaluate(() => window.chromatic.dismiss());
     if (errors.length) throw new Error(errors.join('\n'));
+
     console.log('PASS: profile CRUD, search, PIN setup/unlock, hidden launch enforcement, editor, slimming preview, light/dark/compact render.');
     console.log(`Disposable test data: ${temp}`);
   } finally { await app.close(); }

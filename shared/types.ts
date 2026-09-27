@@ -31,6 +31,8 @@ export interface Api {
   lock(): Promise<void>;
   settings(settings: Settings): Promise<void>;
   manager(id?: string): Promise<void>;
+  launcher(): Promise<void>;
+  clearPending(): Promise<void>;
   dismiss(): Promise<void>;
   activity(): void;
   onChange(callback: () => void): () => void;

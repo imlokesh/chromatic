@@ -11,6 +11,8 @@ const api: Api = {
   chooseDirectory: () => call('chooseDirectory'), exportProfiles: ids => call('exportProfiles', ids), previewSlim: ids => call('previewSlim', ids), clean: tokens => call('clean', tokens),
   unlock: pin => call('unlock', pin), setPin: (pin, oldPin) => call('setPin', pin, oldPin), lock: () => call('lock'),
   settings: settings => call('settings', settings), manager: id => call('manager', id), dismiss: () => call('dismiss'),
+  launcher: () => call('launcher'),
+  clearPending: () => call('clearPending'),
   activity: () => ipcRenderer.send('activity'),
   onChange: callback => { ipcRenderer.on('changed', callback); return () => ipcRenderer.removeListener('changed', callback); }
 };
