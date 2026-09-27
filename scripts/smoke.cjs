@@ -1,0 +1,41 @@
+const { _electron: electron, expect } = require('@playwright/test');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const os = require('node:os');
+const crypto = require('node:crypto');
+(async () => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'chromatic-smoke-'));
+  const appRoot = path.join(temp, 'Chromatic'); await fs.mkdir(appRoot);
+  const profiles = ['Studio', 'Personal', 'Research', 'Side project'].map((name, i) => ({ id: crypto.randomUUID(), name, browserId: 'test-chrome', kind: 'managed', dataDir: path.join(temp, `profile-${i}`), tags: [['work', 'design'], ['everyday'], ['reading'], ['weekends']][i], color: ['#8070c6', '#4e8a76', '#668eae', '#b8784b'][i], favorite: i < 2, hidden: false, urls: [], flags: [], extensions: [], proxy: '', noDefaultFlags: false, createdAt: Date.now() }));
+  await fs.writeFile(path.join(appRoot, 'settings.json'), JSON.stringify({ version: 1, profiles, browsers: [{ id: 'test-chrome', name: 'Chromium (test fixture)', executable: 'C:\\Chromatic-test\\chrome.exe', family: 'chromium', unpackedExtensions: true }], settings: { hotkey: 'Ctrl+Alt+F11', startup: false, theme: 'light', defaultFlags: { chromium: [], firefox: [] } }, attempts: 0, blockedUntil: 0 }));
+  const errors = []; const env = { ...process.env, LOCALAPPDATA: temp }; delete env.ELECTRON_RUN_AS_NODE;
+  const app = await electron.launch({ args: [path.resolve('.')], env });
+  try {
+    const page = await app.firstWindow(); page.on('pageerror', e => errors.push(e.message));
+    await expect(page.getByRole('heading', { name: 'Your profiles', exact: true })).toBeVisible();
+    await expect(page.locator('.profile-row')).toHaveCount(4);
+    await fs.mkdir('artifacts', { recursive: true });
+    await page.screenshot({ path: 'artifacts/manager-light.png' });
+    await page.getByRole('textbox', { name: 'Search profiles' }).fill('reading'); await expect(page.locator('.profile-row')).toHaveCount(1);
+    await page.getByRole('textbox', { name: 'Search profiles' }).fill('');
+    await page.getByRole('button', { name: 'New profile', exact: true }).click();
+    await page.getByLabel('Profile name', { exact: true }).fill('New identity');
+    await page.getByLabel('Browser', { exact: true }).selectOption('test-chrome');
+    await page.getByRole('button', { name: 'Create profile', exact: true }).click(); await expect(page.locator('.profile-row')).toHaveCount(5);
+    await page.getByRole('button', { name: 'Show hidden profiles' }).click();
+    await page.getByLabel('New four-digit PIN').fill('4826'); await page.getByLabel('Confirm PIN').fill('4826'); await page.getByRole('button', { name: 'Save PIN' }).click();
+    await expect(page.getByRole('button', { name: 'Lock discreet profiles' })).toBeVisible();
+    await page.getByRole('button', { name: 'Actions for Studio' }).click(); await page.getByRole('menuitem', { name: 'Hide from launcher' }).click();
+    await page.getByRole('button', { name: 'Lock now' }).click(); await expect(page.locator('.profile-row')).toHaveCount(4);
+    const gated = await page.evaluate(async id => { try { await window.chromatic.launch(id); return false; } catch { return true; } }, profiles[0].id); if (!gated) throw new Error('Hidden launch bypassed PIN');
+    await page.getByRole('button', { name: 'Show hidden profiles' }).click(); await page.getByLabel('Four-digit PIN', { exact: true }).fill('4826'); await page.getByRole('button', { name: 'Unlock profiles', exact: true }).click(); await expect(page.locator('.profile-row')).toHaveCount(5);
+    await page.getByRole('button', { name: 'Actions for Personal' }).click(); await page.getByRole('menuitem', { name: 'Edit profile', exact: true }).click(); await expect(page.getByRole('dialog', { name: 'Edit profile' })).toBeVisible();
+    await page.screenshot({ path: 'artifacts/editor-light.png' }); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await app.evaluate(({ nativeTheme }) => { nativeTheme.themeSource = 'dark'; }); await page.screenshot({ path: 'artifacts/manager-dark.png' });
+    await app.evaluate(({ nativeTheme, BrowserWindow }) => { nativeTheme.themeSource = 'light'; BrowserWindow.getAllWindows()[0].setSize(900, 660); }); await page.screenshot({ path: 'artifacts/manager-compact.png' });
+    await page.getByRole('button', { name: 'Actions for Personal' }).click(); await page.getByRole('menuitem', { name: 'Slim profile…' }).click(); await expect(page.getByRole('dialog', { name: 'Make a little room' })).toBeVisible(); await page.screenshot({ path: 'artifacts/slimming.png' }); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    if (errors.length) throw new Error(errors.join('\n'));
+    console.log('PASS: profile CRUD, search, PIN setup/unlock, hidden launch enforcement, editor, slimming preview, light/dark/compact render.');
+    console.log(`Disposable test data: ${temp}`);
+  } finally { await app.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });
