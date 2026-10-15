@@ -4,7 +4,8 @@ import { Copy, GitFork, Tag, ArrowDownUp, ArrowRight, Check, ChevronDown, Circle
 import { emptyProxy } from '../shared/types';
 import { HeaderFeedback, LabelInput, ProfileLabels, ProxyFields, Operations, StoragePage } from './features';
 import type { Api, Browser, Candidate, Profile, ProfileDraft, Settings, SlimPreview, SlimResult, Snapshot } from '../shared/types';
-import { searchProfiles } from '../shared/search';
+import { coalesceRefresh } from '../shared/performance';
+import { groupProfiles, searchProfiles } from '../shared/search';
 import './styles.css';
 declare global { interface Window { chromatic: Api } }
 const api = window.chromatic;
@@ -28,7 +29,9 @@ function App() {
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [focusIndex, setFocusIndex] = useState(0); const searchRef = useRef<HTMLInputElement>(null);
   const seenPending = useRef(''); const previousUnlock = useRef(false);
-  const refresh = useCallback(async () => {
+  const launchPending = useRef(new Set<string>());
+  const [launching, setLaunching] = useState<string[]>([]);
+  const refresh = useMemo(() => coalesceRefresh(async () => {
     try {
       const next = await api.snapshot(); setState(next); document.documentElement.style.colorScheme = next.settings.theme === 'system' ? 'light dark' : next.settings.theme;
       if (previousUnlock.current && !next.unlocked) { setEdit(undefined); setSelected([]); setSlim(null); setResults(null); setMenu(null); setNotice(''); setError(''); setCopy(null); setBulkLabels(false); setRecovery(undefined); setLabelFilter(''); }
@@ -38,7 +41,7 @@ function App() {
         else if (next.pending.action === 'edit' && seenPending.current !== next.pending.id) { const target = next.profiles.find(p => p.id === next.pending!.id); if (target) setEdit(toDraft(target)); seenPending.current = next.pending.id; void api.clearPending(); }
       } else seenPending.current = '';
     } catch (e: any) { setError(e.message); }
-  }, []);
+  }), []);
   useEffect(() => { void refresh(); return api.onChange(() => { void refresh(); }); }, [refresh]);
   useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(''), 6000); return () => clearTimeout(t); }, [notice]);
   useEffect(() => {
@@ -53,12 +56,31 @@ function App() {
   const run = async (fn: () => Promise<unknown>, message?: string) => { setBusy(true); setError(''); setRecovery(undefined); try { await fn(); if (message) setNotice(message); await refresh(); } catch (e: any) { setError(e.message); setRecovery({ code: e.code, profileId: e.profileId }); } finally { setBusy(false); } };
   const names = useMemo(() => Object.fromEntries((state?.browsers || []).map(b => [b.id, b.name])), [state?.browsers]);
   const profiles = useMemo(() => searchProfiles((state?.profiles || []).filter(p => (!quick || !p.hidden) && (page !== 'favorites' || p.favorite) && (page !== 'recent' || p.lastUsed) && (!labelFilter || p.labels.some(l => l.toLocaleLowerCase() === labelFilter.toLocaleLowerCase()))), query, names), [state?.profiles, page, query, names, labelFilter]);
-  const labelOptions = useMemo(() => [...new Map((state?.profiles || []).flatMap(p => p.labels).map(l => [l.toLocaleLowerCase(), l])).values()].sort((a, b) => a.localeCompare(b)), [state?.profiles]);
+  const labelOptions = useMemo(() => quick ? [] : [...new Map((state?.profiles || []).flatMap(p => p.labels).map(l => [l.toLocaleLowerCase(), l])).values()].sort((a, b) => a.localeCompare(b)), [state?.profiles]);
   const ordered = useMemo(() => !state || query || quick ? profiles : [...profiles].sort((a, b) => state.settings.sortBy === 'name' ? a.name.localeCompare(b.name) : state.settings.sortBy === 'recent' ? (b.lastUsed || 0) - (a.lastUsed || 0) : Number(b.favorite) - Number(a.favorite) || (b.lastUsed || 0) - (a.lastUsed || 0)), [profiles, state?.settings.sortBy, query]);
-  const groups = state?.settings.groupBy === 'label' ? [...labelOptions.filter(label => (!labelFilter || label.toLocaleLowerCase() === labelFilter.toLocaleLowerCase()) && ordered.some(p => p.labels.some(l => l.toLocaleLowerCase() === label.toLocaleLowerCase()))).map(label => ({ label, profiles: ordered.filter(p => p.labels.some(l => l.toLocaleLowerCase() === label.toLocaleLowerCase())) })), ...(ordered.some(p => !p.labels.length) ? [{ label: 'Unlabeled', profiles: ordered.filter(p => !p.labels.length) }] : [])] : [{ label: '', profiles: ordered }];
+  const groups = useMemo(() => quick ? [] : state?.settings.groupBy === 'label' ? groupProfiles(ordered, labelOptions, labelFilter) : [{ label: '', profiles: ordered }], [ordered, labelOptions, labelFilter, state?.settings.groupBy]);
   useEffect(() => { setFocusIndex(0); }, [query, page]);
   useEffect(() => { if (quick) document.querySelector('.quick-row.active')?.scrollIntoView({ block: 'nearest' }); }, [focusIndex]);
-  const launchProfile = (id: string) => run(async () => { const result = await api.launch(id); if (result?.error) { setError(result.error.message); setRecovery(result.error); } else setNotice('Launch request sent.'); });
+  const launchProfile = useCallback(async (id: string) => {
+    if (launchPending.current.has(id)) return;
+    launchPending.current.add(id); setLaunching([...launchPending.current]);
+    if (!quick) { setError(''); setRecovery(undefined); }
+    const report = async (failure: { message: string; code?: string; profileId?: string }) => {
+      // Accepted requests already have persistent recovery in Operations. Only
+      // admission/IPC failures need an inline error in the initiating window.
+      const snapshot = await api.snapshot().catch(() => undefined);
+      if (snapshot && !snapshot.profiles.some(p => p.id === id)) return;
+      if (!quick && snapshot?.operations.some(o => o.type === 'launch' && o.profileIds.includes(id) && o.status === 'error' && o.message === failure.message)) return;
+      setError(failure.message); setRecovery(failure);
+    };
+    try {
+      const result = await api.launch(id);
+      if (result?.error) await report(result.error);
+      else if (!quick) setNotice('Launch request sent.');
+    } catch (e: any) {
+      await report({ message: e.message, code: e.code, profileId: e.profileId });
+    } finally { launchPending.current.delete(id); setLaunching([...launchPending.current]); }
+  }, []);
   const exportProfiles = (ids: string[]) => run(async () => { const count = await api.exportProfiles(ids); if (count) setNotice(`Exported ${count} profile ${count === 1 ? 'file' : 'files'}.`); else setNotice('No new files exported. Existing files were kept.'); });
   const preview = (ids: string[]) => run(async () => { setResults(null); setSlim(await api.previewSlim(ids)); });
   const openMenu = (event: React.MouseEvent, id: string) => { event.preventDefault(); setMenu({ id, x: Math.min(event.clientX, innerWidth - 235), y: Math.min(event.clientY, innerHeight - 385) }); };
@@ -78,7 +100,7 @@ function App() {
     if (e.key === 'Enter' && profiles[focusIndex]) { e.preventDefault(); void launchProfile(profiles[focusIndex].id); }
   }}/>{query ? <button aria-label="Clear search" onClick={() => setQuery('')}><X size={16}/></button> : <kbd>{quick ? 'esc' : 'Ctrl K'}</kbd>}</div>;
   const empty = <div className="empty"><div className="empty-icon"><Layers3 size={32}/></div><h2>{query ? 'No matching profiles' : page === 'favorites' ? 'Keep your regulars close' : page === 'recent' ? 'Your next session starts here' : 'A place for every side of you'}</h2><p>{query ? 'Try a profile name, browser, or label.' : 'Separate work, projects, and everything else. Add a browser profile to get started.'}</p>{!quick && !query && <div className="button-row"><button className="primary" onClick={() => setEdit(null)}><Plus size={16}/>Create profile</button><button className="secondary" onClick={() => run(async () => setCandidates(await api.discover()))}>Find existing profiles</button></div>}</div>;
-  if (quick) return <div className="quick-shell">{searchBox}{messages}<div className="quick-label">{query ? `${profiles.length} matching profiles` : 'Your profiles'}<span>CHROMATIC</span></div><div className="quick-list" id="quick-results" role="listbox" aria-label="Profile results">{!profiles.length ? empty : profiles.map((p, i) => <button key={p.id} id={`result-${p.id}`} role="option" aria-selected={i === focusIndex} className={`quick-row ${i === focusIndex ? 'active' : ''}`} onMouseEnter={() => setFocusIndex(i)} onClick={() => launchProfile(p.id)} onContextMenu={e => openMenu(e, p.id)}><Avatar profile={p}/><span className="row-identity"><strong>{p.name}</strong><span>{names[p.browserId]}{p.labels.length ? ` · ${p.labels.join(', ')}` : ''}</span></span>{p.favorite && <Star size={15} className="favorite"/>}<ArrowRight size={18}/></button>)}</div><footer className="quick-footer"><span><kbd>↑</kbd><kbd>↓</kbd> navigate <kbd>↵</kbd> launch</span><button onClick={() => api.manager()}>Manage profiles <ArrowRight size={14}/></button></footer>{menu && <ContextMenu menu={menu} close={() => setMenu(null)} profile={state.profiles.find(p => p.id === menu.id)!} onEdit={p => void api.manager(p.id)} onFavorite={p => void api.manager(p.id)} onHide={p => void api.manager(p.id)} onExport={p => void api.manager(p.id)} onSlim={p => void api.manager(p.id)}/>}</div>;
+  if (quick) return <div className="quick-shell">{searchBox}{messages}<div className="quick-label">{query ? `${profiles.length} matching profiles` : 'Your profiles'}<span>CHROMATIC</span></div><div className="quick-list" id="quick-results" role="listbox" aria-label="Profile results">{!profiles.length ? empty : profiles.map((p, i) => <button key={p.id} id={`result-${p.id}`} role="option" aria-selected={i === focusIndex} className={`quick-row ${i === focusIndex ? 'active' : ''}`} aria-disabled={launching.includes(p.id)} onMouseEnter={() => setFocusIndex(i)} onClick={() => launchProfile(p.id)} onContextMenu={e => openMenu(e, p.id)}><Avatar profile={p}/><span className="row-identity"><strong>{p.name}</strong><span>{names[p.browserId]}{p.labels.length ? ` · ${p.labels.join(', ')}` : ''}</span></span>{p.favorite && <Star size={15} className="favorite"/>}<ArrowRight size={18}/></button>)}</div><footer className="quick-footer"><span><kbd>↑</kbd><kbd>↓</kbd> navigate <kbd>↵</kbd> launch</span><button onClick={() => api.manager()}>Manage profiles <ArrowRight size={14}/></button></footer>{menu && <ContextMenu menu={menu} close={() => setMenu(null)} profile={state.profiles.find(p => p.id === menu.id)!} onEdit={p => void api.manager(p.id)} onFavorite={p => void api.manager(p.id)} onHide={p => void api.manager(p.id)} onExport={p => void api.manager(p.id)} onSlim={p => void api.manager(p.id)}/>}</div>;
   return <div className="app-shell" onClick={() => menu && setMenu(null)}>
     <aside className="sidebar"><div className="brand"><img src={new URL('../assets/icon.svg', import.meta.url).href} alt=""/><span>chromatic<span className="brand-dot">.</span></span></div><div className="workspace-caption">YOUR WORKSPACE</div><nav aria-label="Main navigation">
       <Nav icon={<Layers3 size={18}/>} label="All profiles" active={page === 'all'} onClick={() => changePage('all')} count={state.profiles.length}/>
@@ -95,7 +117,7 @@ function App() {
       {state.unlocked && <div className="unlock-notice"><UnlockKeyhole size={15}/>Discreet profiles are visible in this manager.<button onClick={() => run(() => api.lock())}>Lock now</button></div>}
       <div className="view-controls"><label>Filter label<select value={labelFilter} onChange={e => { setLabelFilter(e.target.value); setSelected([]); }}><option value="">All labels</option>{labelOptions.map(l => <option key={l}>{l}</option>)}</select></label><label>Group by<select value={state.settings.groupBy} onChange={e => run(() => api.settings({ ...state.settings, groupBy: e.target.value as Settings['groupBy'] }))}><option value="none">None</option><option value="label">Label</option></select></label><label>Sort by<select value={state.settings.sortBy} onChange={e => run(() => api.settings({ ...state.settings, sortBy: e.target.value as Settings['sortBy'] }))}><option value="favorites">Favorites first</option><option value="name">Name</option><option value="recent">Recently used</option></select></label></div>
       <div className="list-heading"><span>{selected.length ? `${selected.length} selected` : `${profiles.length} ${profiles.length === 1 ? 'profile' : 'profiles'}`}</span>{selected.length ? <div className="button-row"><button onClick={() => setBulkLabels(true)}><Tag size={14}/>Labels</button><button onClick={() => exportProfiles(selected)}><Download size={14}/>Export</button><button onClick={() => preview(selected)}><HardDrive size={14}/>Slim profiles</button><button onClick={() => setSelected([])}>Clear</button></div> : <button onClick={() => setSelected(profiles.map(p => p.id))}>Select all</button>}</div>
-      {!profiles.length ? empty : <div className="profile-list">{groups.map(group => <section key={group.label || 'all'}>{group.label && <h2 className="group-heading">{group.label}<span>{group.profiles.length}</span></h2>}{group.profiles.map(p => <div className="profile-row" key={p.id} onContextMenu={e => openMenu(e, p.id)}><input className="row-check" type="checkbox" aria-label={`Select ${p.name}`} checked={selected.includes(p.id)} onChange={e => setSelected(s => e.target.checked ? [...s, p.id] : s.filter(id => id !== p.id))}/><Avatar profile={p}/><button className="profile-identity" onClick={() => launchProfile(p.id)}><strong>{p.name}{p.hidden && <EyeOff size={14} aria-label="Hidden"/>}</strong><BrowserMark browser={state.browsers.find(b => b.id === p.browserId)}/></button><ProfileLabels profile={p} active={labelFilter || group.label}/><button className={`icon-button ${p.favorite ? 'favorite' : ''}`} aria-label={`${p.favorite ? 'Unfavorite' : 'Favorite'} ${p.name}`} onClick={() => run(() => api.save({ ...toDraft(p), favorite: !p.favorite }))}><Star size={17} fill={p.favorite ? 'currentColor' : 'none'}/></button><button className="launch-button" disabled={busy} onClick={() => launchProfile(p.id)}>Launch <ArrowRight size={15}/></button><button className="icon-button" aria-label={`Actions for ${p.name}`} onClick={e => { e.stopPropagation(); openMenu(e, p.id); }}><Ellipsis size={19}/></button></div>)}</section>)}</div>}
+      {!profiles.length ? empty : <div className="profile-list">{groups.map(group => <section key={group.label || 'all'}>{group.label && <h2 className="group-heading">{group.label}<span>{group.profiles.length}</span></h2>}{group.profiles.map(p => <div className="profile-row" key={p.id} onContextMenu={e => openMenu(e, p.id)}><input className="row-check" type="checkbox" aria-label={`Select ${p.name}`} checked={selected.includes(p.id)} onChange={e => setSelected(s => e.target.checked ? [...s, p.id] : s.filter(id => id !== p.id))}/><Avatar profile={p}/><button className="profile-identity" disabled={launching.includes(p.id)} onClick={() => launchProfile(p.id)}><strong>{p.name}{p.hidden && <EyeOff size={14} aria-label="Hidden"/>}</strong><BrowserMark browser={state.browsers.find(b => b.id === p.browserId)}/></button><ProfileLabels profile={p} active={labelFilter || group.label}/><button className={`icon-button ${p.favorite ? 'favorite' : ''}`} aria-label={`${p.favorite ? 'Unfavorite' : 'Favorite'} ${p.name}`} onClick={() => run(() => api.save({ ...toDraft(p), favorite: !p.favorite }))}><Star size={17} fill={p.favorite ? 'currentColor' : 'none'}/></button><button className="launch-button" disabled={launching.includes(p.id)} onClick={() => launchProfile(p.id)}>{launching.includes(p.id) ? 'Launching…' : 'Launch'} <ArrowRight size={15}/></button><button className="icon-button" aria-label={`Actions for ${p.name}`} onClick={e => { e.stopPropagation(); openMenu(e, p.id); }}><Ellipsis size={19}/></button></div>)}</section>)}</div>}
       <div className="library-footer"><ShieldCheck size={16}/><span>Browser data stays on your computer.</span><button onClick={() => setPage('settings')}>Launcher preferences <ArrowRight size={14}/></button></div>
       </>}
       </div></main>

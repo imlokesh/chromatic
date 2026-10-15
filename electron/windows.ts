@@ -11,7 +11,16 @@ export async function defaultBrowserCommand() {
   } catch { return ''; }
 }
 export interface ProcessInfo { ExecutablePath?: string; CommandLine?: string; Name: string; ProcessId: number }
-export async function processes(): Promise<ProcessInfo[]> {
-  const data = await powershell("@(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object Name,ProcessId,ExecutablePath,CommandLine) | ConvertTo-Json -Compress");
-  return JSON.parse(data || '[]');
+const processQueries = new Map<string, Promise<ProcessInfo[]>>();
+export function processes(name?: string): Promise<ProcessInfo[]> {
+  const key = name?.toLowerCase() || '';
+  const pending = processQueries.get(key);
+  if (pending) return pending;
+  // Quote both the WQL literal and the enclosing PowerShell literal.
+  const filter = key ? ` -Filter '${`Name='${key.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`.replace(/'/g, "''")}'` : '';
+  const request = powershell(`@(Get-CimInstance Win32_Process${filter} -ErrorAction Stop | Select-Object Name,ProcessId,ExecutablePath,CommandLine) | ConvertTo-Json -Compress`)
+    .then(data => { const rows = JSON.parse(data || '[]'); return Array.isArray(rows) ? rows : [rows]; })
+    .finally(() => { if (processQueries.get(key) === request) processQueries.delete(key); });
+  processQueries.set(key, request);
+  return request;
 }

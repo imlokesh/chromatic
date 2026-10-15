@@ -47,5 +47,5 @@ export interface Api {
 
 export interface ProxyConfig { mode: 'system' | 'server' | 'review'; protocol: 'http' | 'https' | 'socks5'; host: string; port: number; username: string; hasPassword?: boolean; password?: string; clearPassword?: boolean; legacy?: string }
 export interface StorageUsage { profileId: string; bytes: number; cacheBytes: number; sharedBytes: number; rootKey: string; scannedAt: number; incomplete: boolean; message?: string }
-export interface Operation { id: string; type: 'fork' | 'duplicate' | 'storage' | 'proxy'; status: 'running' | 'complete' | 'error' | 'cancelled'; profileIds: string[]; done: number; total: number; message: string; resultId?: string; storage?: StorageUsage[]; proxyResult?: { ip: string; elapsedMs: number; checkedAt: number } }
+export interface Operation { id: string; type: 'fork' | 'duplicate' | 'storage' | 'proxy' | 'launch'; status: 'running' | 'complete' | 'error' | 'cancelled'; profileIds: string[]; done: number; total: number; message: string; resultId?: string; recoveryCode?: string; storage?: StorageUsage[]; proxyResult?: { ip: string; elapsedMs: number; checkedAt: number } }
 export const emptyProxy = (): ProxyConfig => ({ mode: 'system', protocol: 'http', host: '', port: 8080, username: '' });

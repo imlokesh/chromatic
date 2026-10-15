@@ -1,6 +1,6 @@
 {
   "name": "chromatic-launcher",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A quiet home for every browser profile",
   "author": "Chromatic",
   "private": true,
@@ -12,7 +12,8 @@
     "test": "vitest run",
     "package": "npm run build && electron-builder --win nsis --x64 --publish never",
     "check": "tsc --noEmit",
-    "test:smoke": "npm run build && node scripts/smoke.cjs"
+    "test:smoke": "npm run build && node scripts/smoke.cjs",
+    "test:performance": "npm run build && node scripts/performance-smoke.cjs"
   },
   "dependencies": {
     "https-proxy-agent": "^7.0.6",

@@ -1,5 +1,14 @@
 # v0.2.0 verification
 
+## 0.2.1 launcher responsiveness update — 2026-10-15
+
+- All 50 unit tests and the production build pass. The manager and feature Electron smoke suites pass with the new launch recovery UI.
+- `npm run test:performance` uses 1,000 disposable profiles, delayed process queries, and simulated browser outcomes. It checks immediate dismissal, repeated Enter, reopening during launch, keyboard/search/Escape, background failure recovery, proxy bridge disposal, missing storage, cleanup/fork exclusion, queued private-launch cancellation across lock/unlock, and distinct persistence failures.
+- Launcher dismissal measured 5.7–7.9 ms with a simulated 1,500 ms process check. Search and keyboard selection were visible in approximately 52–67 ms, including automation overhead. These measure UI response, not browser window readiness.
+- Before the change, the real unfiltered process query took 1.71–1.76 seconds; the handler additionally waited up to 900 ms after spawning. Filtered queries still take roughly 1.5–1.6 seconds on this machine, but no longer delay launcher dismissal. Completed process results are not cached.
+- A 200-file fork generated 10 manager notifications and one launcher notification, instead of broadcasting after every file. Grouping 1,000 profiles across 110 labels measured 11.2 ms before and 0.9 ms after, with identical results; launcher mode skips grouping entirely.
+- A real disposable Node process confirmed spawn acceptance in 7 ms and asynchronous reporting of an early nonzero exit. Browser safety checks and existing proxy configuration rules remain in place. The 0.2.1 NSIS installer was built, and both existing Electron smoke suites passed against the packaged executable using disposable profiles.
+
 Validated on Windows 10 x64 with Node.js 22.17.1 and Electron 41.10.7.
 
 ## Automated checks

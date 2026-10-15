@@ -6,7 +6,7 @@ A Windows launcher for Chromium-based browser profiles, built with Electron, Typ
 
 ## Install
 
-Download **Chromatic.Setup.0.2.0.exe** from the [private release page](https://github.com/imlokesh/chromatic/releases/tag/v0.2.0). Sign in with an account that has repository access. The per-user installer registers `.chromatic` references and their **Open** and **Edit profile** Explorer actions. On Windows 11, Edit profile may be under **Show more options**.
+Download **Chromatic.Setup.0.2.1.exe** from the [private release page](https://github.com/imlokesh/chromatic/releases/tag/v0.2.1). Sign in with an account that has repository access. The per-user installer registers `.chromatic` references and their **Open** and **Edit profile** Explorer actions. On Windows 11, Edit profile may be under **Show more options**.
 
 The build is unsigned; Windows may show an unknown publisher. Install new releases over the existing version. There is no automatic updater. Uninstalling preserves browser data and app settings.
 
@@ -52,12 +52,15 @@ npm test
 npm run build
 node scripts/smoke.cjs
 node scripts/features-smoke.cjs
+npm run test:performance
 node scripts/fork-browser-smoke.cjs
 node scripts/proxy-live-smoke.cjs
 npm run package
 ```
 
 Electron/browser tests use disposable profiles, never real user data. The live proxy test contacts ipify through a local authenticated fixture; other proxy tests use local servers. `tests/localhost-{cert,key}.pem` are public self-signed localhost test fixtures, not production credentials. Screenshots go in ignored `artifacts/`. Set `CHROMATIC_SMOKE_EXE` to an installed executable to test that package with the Electron smoke scripts.
+
+The performance suite runs the development build with 1,000 profiles, delayed process checks, simulated browser failures, and a many-file fork. It measures launcher dismissal and exercises background launch recovery without starting real browsers.
 
 `npm run dev:app` builds and launches Electron; `npm run dev` serves only the renderer. Installers go under `release/`. Windows CI runs unit tests, builds, exercises both Electron smoke scripts, and packages installer artifacts.
 

@@ -1,4 +1,19 @@
 import type { Profile } from './types';
+export function groupProfiles(profiles: Profile[], labels: string[], labelFilter: string) {
+  const buckets = new Map<string, Profile[]>();
+  const unlabeled: Profile[] = [];
+  for (const p of profiles) {
+    if (!p.labels.length) unlabeled.push(p);
+    for (const label of new Set(p.labels.map(l => l.toLocaleLowerCase()))) {
+      const bucket = buckets.get(label) || [];
+      bucket.push(p); buckets.set(label, bucket);
+    }
+  }
+  const filter = labelFilter.toLocaleLowerCase();
+  return [...labels.filter(label => (!filter || label.toLocaleLowerCase() === filter) && buckets.has(label.toLocaleLowerCase()))
+    .map(label => ({ label, profiles: buckets.get(label.toLocaleLowerCase())! })),
+    ...(unlabeled.length ? [{ label: 'Unlabeled', profiles: unlabeled }] : [])];
+}
 export function searchProfiles(profiles: Profile[], query: string, browserNames: Record<string, string> = {}) {
   const q = query.trim().toLocaleLowerCase();
   const score = (p: Profile) => {

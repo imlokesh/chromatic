@@ -23,8 +23,8 @@ export async function noLinks(target: string) {
   if (path.resolve(resolved).toLowerCase() !== absolute.toLowerCase()) throw new Error('Cache path resolved outside its expected location.');
 }
 export async function browserClosed(browser: Browser): Promise<void> {
-  const list = await processes();
   const basename = path.basename(browser.executable).toLowerCase();
+  const list = await processes(basename);
   if (list.some(p => p.Name.toLowerCase() === basename)) throw new Error(`Close all ${browser.name} windows and background processes before slimming. No files were removed.`);
 }
 interface FileEntry { path: string; size: number; mtime: number; ino: number }

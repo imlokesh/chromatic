@@ -2,7 +2,8 @@ import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage,
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { LaunchQueue, spawnBrowser } from './launch';
+import { progressNotifier } from '../shared/performance';
 import { z } from 'zod';
 import { Store, draftSchema, referenceSchema, requireProfile, settingsSchema, visibleProfiles, proxySchema, labelList } from './store';
 import { browserId, canonical, detectBrowsers, discoverProfiles, exists, launchArgs, validateFlags } from './browsers';
@@ -21,19 +22,21 @@ let quitting = false; let hotkeyError: string | undefined; let pending: Snapshot
 let discovered: Candidate[] = []; let wasUnlocked = false;
 const uuid = z.string().uuid(); const idsSchema = z.array(uuid).max(1000);
 class LaunchError extends Error { constructor(public code: string, message: string, public profileId: string) { super(message); } }
-const operations = new Map<string, { value: Operation; controller: AbortController }>();
+const operations = new Map<string, { value: Operation; controller: AbortController; fromLauncher?: boolean }>();
+const launchQueue = new LaunchQueue();
 const launched = new Map<string, { config: string; bridge?: Awaited<ReturnType<typeof createBridge>> }>();
 function beginOperation(type: Operation['type'], profileIds: string[], work: (o: Operation, signal: AbortSignal) => Promise<void>) {
   for (const [id, op] of operations) if (op.value.status !== 'running' && operations.size >= 30) operations.delete(id);
   const value: Operation = { id: randomUUID(), type, profileIds, status: 'running', done: 0, total: 0, message: 'Preparing…' };
   const controller = new AbortController(); operations.set(value.id, { value, controller });
-  void work(value, controller.signal).then(() => { value.status = 'complete'; }, error => { value.status = controller.signal.aborted ? 'cancelled' : 'error'; value.message = controller.signal.aborted ? 'Cancelled. No new profile was registered.' : error.name === 'AbortError' ? 'Cancelled.' : error.message || 'The operation failed. Please try again.'; }).finally(changed);
-  changed(); return value.id;
+  void work(value, controller.signal).then(() => { value.status = 'complete'; }, error => { value.status = controller.signal.aborted ? 'cancelled' : 'error'; value.message = controller.signal.aborted ? 'Cancelled. No new profile was registered.' : error.name === 'AbortError' ? 'Cancelled.' : error.message || 'The operation failed. Please try again.'; }).finally(() => operationChanges.flush());
+  operationChanges.flush(); return value.id;
 }
 function cancelPrivateOperations() { for (const o of operations.values()) if (o.value.profileIds.some(id => store.state.profiles.find(p => p.id === id)?.hidden)) o.controller.abort(); }
 function publicProfile(p: Profile): Profile { return { ...p, proxy: { ...p.proxy, hasPassword: !!store.state.proxySecrets[p.id] } }; }
 const asset = (name: string) => path.join(app.getAppPath(), 'assets', name);
 const changed = () => { for (const window of BrowserWindow.getAllWindows()) window.webContents.send('changed'); };
+const operationChanges = progressNotifier(() => { if (manager && !manager.isDestroyed()) manager.webContents.send('changed'); });
 function lock() { gate.lock(); cancelPrivateOperations(); cleaner.invalidate(); changed(); }
 function profile(id: unknown) { return requireProfile(store.state.profiles, uuid.parse(id), gate.unlocked); }
 function browserFor(p: Profile) { const b = store.state.browsers.find(b => b.id === p.browserId); if (!b) throw new Error('Choose an installed browser for this profile.'); return b; }
@@ -69,39 +72,90 @@ function registerHotkey() {
   try { if (!globalShortcut.register(store.state.settings.hotkey, showLauncher)) hotkeyError = 'This shortcut is already in use. Choose another in Settings.'; }
   catch { hotkeyError = 'This shortcut is not valid. Choose another in Settings.'; }
 }
-async function launch(id: string) {
-  const p = profile(id); const b = browserFor(p);
-  if (cleaner.busy.size || [...operations.values()].some(o => o.value.type === 'fork' && o.value.status === 'running')) throw new Error('Wait for cache cleanup to finish before launching a browser.');
+async function launch(id: string, fromLauncher = false) {
+  const requested = profile(id);
+  if (fromLauncher) launcher?.hide();
+  const existing = launchQueue.pending(id);
+  if (existing) {
+    const record = [...operations.values()].find(o => o.value.type === 'launch' && o.value.status === 'running' && o.value.profileIds.includes(id));
+    if (record) record.fromLauncher ||= fromLauncher;
+    return existing;
+  }
+  // Register before entering the root queue so locking also cancels queued work.
+  const value: Operation = { id: randomUUID(), type: 'launch', profileIds: [id], status: 'running', done: 0, total: 0, message: 'Starting browser…' };
+  const controller = new AbortController();
+  const record = { value, controller, fromLauncher };
+  for (const [key, op] of operations) if (op.value.status !== 'running' && operations.size >= 30) operations.delete(key);
+  operations.set(value.id, record); operationChanges.flush();
+  return launchQueue.run(id, canonical(requested.dataDir), async () => {
+    const fail = (error: any) => {
+      value.status = controller.signal.aborted ? 'cancelled' : 'error';
+      value.message = controller.signal.aborted ? 'Launch cancelled.' : error.message || 'The browser could not start.';
+      value.recoveryCode = error instanceof LaunchError ? error.code : undefined;
+      operationChanges.flush();
+      // Locked or removed profiles must never open a recovery surface with private data.
+      const current = store.state.profiles.find(p => p.id === id);
+      if (record.fromLauncher && current && (!current.hidden || gate.unlocked) && !controller.signal.aborted) showManager();
+    };
+    try {
+      await performLaunch(id, controller.signal, fail);
+      if (value.status === 'running') { value.status = 'complete'; value.message = 'Launch request sent.'; }
+      operationChanges.flush();
+    } catch (error) { fail(error); throw error; }
+  });
+}
+function ensureLaunchAllowed() {
+  if (cleaner.busy.size || [...operations.values()].some(o => o.value.type === 'fork' && o.value.status === 'running')) throw new Error('Wait for cache cleanup or copying to finish before launching a browser.');
+}
+async function performLaunch(id: string, signal: AbortSignal, earlyFailure: (error: Error) => void) {
+  signal.throwIfAborted();
+  const p = structuredClone(profile(id)); const b = structuredClone(browserFor(p));
+  const settings = structuredClone(store.state.settings);
+  const secret = store.state.proxySecrets[id];
+  ensureLaunchAllowed();
   if (!await exists(b.executable)) throw new LaunchError('browser', 'The browser executable is missing. Locate its new installation to reconnect your profiles.', p.id);
   if (!await exists(p.dataDir)) {
     if (p.kind === 'existing' || p.lastUsed) throw new LaunchError('storage', 'The profile folder is unavailable. Reconnect its drive, then retry.', p.id);
     await fs.mkdir(p.dataDir, { recursive: true });
   }
-  let endpoint: string | undefined;
-  const running = (await processes()).filter(proc => proc.Name.toLowerCase() === path.basename(b.executable).toLowerCase());
+  // Reject invalid arguments before allocating a proxy bridge.
+  launchArgs(b, p, settings);
+  const running = await processes(path.basename(b.executable));
   const runningHere = running.some(proc => !proc.CommandLine || proc.CommandLine.toLowerCase().includes(canonical(p.dataDir)) || (p.kind === 'existing' && !proc.CommandLine.includes('--user-data-dir')));
-  const key = canonical(p.dataDir); const config = JSON.stringify([p.flags, p.noDefaultFlags, store.state.settings.defaultFlags, p.proxy, store.state.proxySecrets[p.id]]);
+  const key = canonical(p.dataDir); const config = JSON.stringify([p.flags, p.noDefaultFlags, settings.defaultFlags, p.proxy, secret]);
   const current = launched.get(key);
   if (runningHere && (!current || current.config !== config)) throw new LaunchError('restart', 'This browser data folder is already in use. Close its browser windows and background processes, then launch again to apply these settings.', p.id);
-  if (p.proxy.mode === 'server') {
-    if (current && current.config === config && current.bridge) endpoint = current.bridge.endpoint;
-    else {
-      if (current?.bridge) await current.bridge.close();
-      const bridge = await createBridge(p.proxy, revealProxy(store.state.proxySecrets[p.id], safeStorage));
-      endpoint = bridge.endpoint; launched.set(key, { config, bridge });
+  let bridge = current?.bridge;
+  let createdBridge: Awaited<ReturnType<typeof createBridge>> | undefined;
+  let spawned = false;
+  try {
+    if (p.proxy.mode === 'server') {
+      if (!current || current.config !== config || !bridge) {
+        if (bridge) { await bridge.close(); launched.delete(key); }
+        bridge = createdBridge = await createBridge(p.proxy, revealProxy(secret, safeStorage));
+      }
+    } else {
+      if (!runningHere && bridge) { await bridge.close(); launched.delete(key); }
+      bridge = undefined;
     }
-  } else { if (!runningHere && current?.bridge) await current.bridge.close(); launched.set(key, { config }); }
-  const args = launchArgs(b, p, store.state.settings, endpoint);
-  profile(id); // Recheck a hidden profile after asynchronous filesystem/process checks.
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(b.executable, args, { detached: true, stdio: 'ignore', windowsHide: false, shell: false });
-    let timer: ReturnType<typeof setTimeout>;
-    child.once('error', reject);
-    child.once('spawn', () => { timer = setTimeout(() => { child.unref(); resolve(); }, 900); });
-    child.once('exit', code => { clearTimeout(timer); if (code && code !== 0) reject(new Error(`The browser exited with code ${code}. Check its profile location and launch settings.`)); else resolve(); });
-  });
-  p.lastUsed = Date.now(); await store.persist(); launcher?.hide(); changed();
+    signal.throwIfAborted();
+    const latest = profile(id);
+    if (JSON.stringify([latest.flags, latest.noDefaultFlags, store.state.settings.defaultFlags, latest.proxy, store.state.proxySecrets[id]]) !== config || latest.browserId !== p.browserId || browserFor(latest).executable !== b.executable || JSON.stringify([latest.urls, latest.extensions]) !== JSON.stringify([p.urls, p.extensions])) throw new Error('Profile settings changed while preparing the launch. Please retry.');
+    ensureLaunchAllowed();
+    await spawnBrowser(b.executable, launchArgs(b, p, settings, bridge?.endpoint), earlyFailure);
+    spawned = true;
+    launched.set(key, { config, bridge });
+    const registered = store.state.profiles.find(item => item.id === id);
+    if (registered) registered.lastUsed = Date.now();
+    changed();
+    try { await store.persist(); }
+    catch { throw new LaunchError('save', 'The browser started, but its recent-use time could not be saved. Check that Chromatic’s settings folder is writable.', id); }
+  } catch (error) {
+    if (!spawned && createdBridge) await createdBridge.close().catch(() => {});
+    throw error;
+  }
 }
+
 async function handleFileArgs(args: string[]) {
   const file = args.find(a => a.toLowerCase().endsWith('.chromatic'));
   if (!file) { showManager(); return; }
@@ -124,7 +178,7 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
       pending: isLauncher ? undefined : pending, version: app.getVersion(), operations: isLauncher ? [] : [...operations.values()].map(o => o.value).filter(o => o.profileIds.every(id => { const p = store.state.profiles.find(p => p.id === id); return p && (!p.hidden || gate.unlocked); }) || !o.profileIds.length) };
     return result;
   }
-  if (method === 'launch') return launch(uuid.parse(args[0]));
+  if (method === 'launch') return launch(uuid.parse(args[0]), isLauncher);
   if (method === 'launcher') { showLauncher(); return; }
   if (method === 'clearPending') { pending = undefined; return; }
   if (method === 'manager') { launcher?.hide(); showManager(args[0] ? uuid.parse(args[0]) : undefined); return; }
@@ -141,6 +195,7 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
   if (method === 'copyProfile') {
     const source = structuredClone(profile(args[0])); const mode = z.enum(['duplicate', 'fork']).parse(args[1]); const name = z.string().trim().min(1).max(120).parse(args[2]);
     if (cleaner.busy.size || [...operations.values()].some(o => o.value.type === 'fork' && o.value.status === 'running')) throw new Error('Wait for the current copy or cleanup to finish.');
+    if (mode === 'fork' && launchQueue.hasRoot(canonical(source.dataDir))) throw new Error('Wait for this browser launch to finish before copying its data.');
     const target = duplicateProfile(source, root, name); const browser = browserFor(source); const secret = store.state.proxySecrets[source.id];
     return beginOperation(mode, [source.id], async (o, signal) => {
       let lastCheck = 0;
@@ -148,7 +203,7 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
       try {
       if (mode === 'fork') {
         o.message = 'Copying persistent browser data…';
-        await forkProfile(source, target, check, (done, total) => { o.done = done; o.total = total; changed(); });
+        await forkProfile(source, target, check, (done, total) => { o.done = done; o.total = total; operationChanges.progress(); });
       }
       signal.throwIfAborted(); profile(source.id);
       store.state.profiles.push(target); if (secret) store.state.proxySecrets[target.id] = secret;
@@ -161,13 +216,13 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
         }
         throw e;
       }
-      o.resultId = target.id; o.message = mode === 'fork' ? 'Fork ready. Browser data was copied; some sites may ask you to sign in again.' : 'Duplicate ready. Its browser data starts empty.';
+      changed(); o.resultId = target.id; o.message = mode === 'fork' ? 'Fork ready. Browser data was copied; some sites may ask you to sign in again.' : 'Duplicate ready. Its browser data starts empty.';
     });
   }
-  if (method === 'cancelOperation') { const o = operations.get(uuid.parse(args[0])); if (o) { for (const id of o.value.profileIds) profile(id); o.controller.abort(); } return; }
+  if (method === 'cancelOperation') { const o = operations.get(uuid.parse(args[0])); if (o && o.value.type !== 'launch') { for (const id of o.value.profileIds) profile(id); o.controller.abort(); } return; }
   if (method === 'scanStorage') {
     const profiles = [...new Set(idsSchema.parse(args[0]))].map(id => structuredClone(profile(id)));
-    return beginOperation('storage', profiles.map(p => p.id), async (o, signal) => { o.total = profiles.length; o.storage = []; for (const p of profiles) { const check = () => { signal.throwIfAborted(); profile(p.id); }; check(); o.message = 'Measuring profile data…'; const row = await scanProfileStorage(p, check); check(); o.storage.push(row); o.done++; changed(); } o.message = 'Storage scan complete. Sizes are estimates while browsers are running.'; });
+    return beginOperation('storage', profiles.map(p => p.id), async (o, signal) => { o.total = profiles.length; o.storage = []; for (const p of profiles) { const check = () => { signal.throwIfAborted(); profile(p.id); }; check(); o.message = 'Measuring profile data…'; const row = await scanProfileStorage(p, check); check(); o.storage.push(row); o.done++; operationChanges.progress(); } o.message = 'Storage scan complete. Sizes are estimates while browsers are running.'; });
   }
   if (method === 'testProxy') {
     const proxy = proxySchema.parse(args[0]); const p = args[1] ? profile(args[1]) : undefined;
@@ -245,7 +300,7 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
   if (method === 'clean') {
     if ([...operations.values()].some(o => o.value.type === 'fork' && o.value.status === 'running')) throw new Error('Wait for the fork to finish before clearing cache.');
     const tokens = idsSchema.parse(args[0]); const results = []; const checkedIds: string[] = [];
-    for (const token of tokens) { const id = cleaner.profileForToken(token); if (!id) throw new Error('Scan this profile again before cleanup.'); profile(id); checkedIds.push(id); results.push(await cleaner.clean(token)); }
+    for (const token of tokens) { const id = cleaner.profileForToken(token); if (!id) throw new Error('Scan this profile again before cleanup.'); const p = profile(id); if (launchQueue.hasRoot(canonical(p.dataDir))) throw new Error('Wait for this browser launch to finish before clearing its cache.'); checkedIds.push(id); results.push(await cleaner.clean(token)); }
     for (const id of checkedIds) profile(id);
     return results;
   }
