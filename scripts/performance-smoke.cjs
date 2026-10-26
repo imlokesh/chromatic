@@ -3,6 +3,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
+// The launcher is created hidden ahead of time, so find its window rather than wait for a new one.
+async function launcherPage(app) { const find = () => app.windows().find(w => w.url().includes('mode=launcher')); await expect.poll(() => !!find(), { timeout: 15000 }).toBe(true); return find(); }
 
 (async () => {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'chromatic-performance-')));
@@ -17,15 +19,23 @@ const { randomUUID } = require('node:crypto');
   try {
     const page = await app.firstWindow(); const errors = [];
     page.on('pageerror', e => errors.push(e.message));
-    await expect(page.locator('.profile-row')).toHaveCount(1000);
+    // Long lists render in pages; the heading still counts every profile and scrolling reaches them all.
+    await expect(page.locator('.list-heading')).toContainText('1000 profiles'); await expect(page.locator('.profile-row')).toHaveCount(100);
+    await expect.poll(async () => { await page.locator('.main').evaluate(el => { el.scrollTop = el.scrollHeight; }); return page.locator('.profile-row').count(); }, { timeout: 20000 }).toBe(1000);
+    await expect(page.locator('.profile-row').last()).toContainText('Profile 0999'); await page.locator('.main').evaluate(el => { el.scrollTop = 0; });
+    console.log('PASS: manager renders 100 of 1000 rows at first and loads the rest while scrolling');
     await app.evaluate(({ app }) => {
       const require = process.mainModule.require.bind(process.mainModule);
       const path = require('node:path'); const { EventEmitter } = require('node:events');
       const state = globalThis.performanceFixture = { delay: 1500, scans: 0, spawns: 0, active: 0, maxActive: 0, mode: 'success', bridges: 0, closed: 0 };
-      require(path.join(app.getAppPath(), 'dist-electron/electron/windows.js')).processes = async () => {
+      const windows = require(path.join(app.getAppPath(), 'dist-electron/electron/windows.js'));
+      // Simulate a slow in-use check on the launch path, whichever check it takes.
+      const slow = result => async () => {
         state.scans++; state.maxActive = Math.max(state.maxActive, ++state.active);
-        await new Promise(r => setTimeout(r, state.delay)); state.active--; return [];
+        await new Promise(r => setTimeout(r, state.delay)); state.active--; return result;
       };
+      windows.processes = slow([]); windows.dataDirInUse = slow(false);
+      windows.processNames = async () => []; // The fixture browser is this Electron executable.
       require('node:child_process').spawn = () => {
         state.spawns++; const child = Object.assign(new EventEmitter(), { unref() {} });
         setTimeout(() => {
@@ -39,9 +49,10 @@ const { randomUUID } = require('node:crypto');
         state.bridges++; return { endpoint: 'http://127.0.0.1:43210', close: async () => { state.closed++; } };
       };
     });
-    const quickPromise = app.waitForEvent('window'); await page.evaluate(() => window.chromatic.launcher());
-    const quick = await quickPromise; quick.on('pageerror', e => errors.push(e.message));
-    await expect(quick.locator('.quick-row')).toHaveCount(1000);
+    const quick = await launcherPage(app); quick.on('pageerror', e => errors.push(e.message));
+    const openStart = performance.now(); await page.evaluate(() => window.chromatic.launcher());
+    await expect(quick.locator('.quick-row')).toHaveCount(50); await expect(quick.locator('.quick-label')).toContainText('Your profiles');
+    console.log(`first launcher open with 1000 profiles: ${Math.round(performance.now() - openStart)} ms`);
     const search = quick.getByRole('combobox');
     const searchStart = performance.now(); await search.fill('Profile 0099'); await expect(quick.locator('.quick-row').first()).toContainText('Profile 0099');
     console.log(`1000-profile search visible: ${Math.round(performance.now() - searchStart)} ms`);
@@ -123,18 +134,18 @@ const { randomUUID } = require('node:crypto');
     await app.evaluate(() => { globalThis.performanceFixture.delay = 0; });
     await Promise.all(Array.from({ length: 200 }, (_, i) => fs.writeFile(path.join(profiles[0].dataDir, 'Default', `file-${i}`), 'persistent')));
     await app.evaluate(({ BrowserWindow }) => {
-      globalThis.performanceFixture.notifications = { manager: 0, launcher: 0 };
+      globalThis.performanceFixture.notifications = { manager: 0, launcher: 0, managerOperations: 0, launcherOperations: 0 };
       for (const win of BrowserWindow.getAllWindows()) {
         const mode = win.webContents.getURL().includes('mode=launcher') ? 'launcher' : 'manager';
         const original = win.webContents.send.bind(win.webContents);
-        win.webContents.send = (channel, ...args) => { if (channel === 'changed') globalThis.performanceFixture.notifications[mode]++; return original(channel, ...args); };
+        win.webContents.send = (channel, ...args) => { if (channel === 'changed') globalThis.performanceFixture.notifications[mode]++; if (channel === 'operations') globalThis.performanceFixture.notifications[`${mode}Operations`]++; return original(channel, ...args); };
       }
     });
     const operationId = await page.evaluate(id => window.chromatic.copyProfile(id, 'fork', 'Performance fork'), profiles[0].id);
     await expect.poll(async () => (await page.evaluate(() => window.chromatic.snapshot())).operations.find(o => o.id === operationId)?.status, { timeout: 30000 }).toBe('complete');
     const notifications = await app.evaluate(() => globalThis.performanceFixture.notifications);
-    if (notifications.launcher !== 1 || notifications.manager >= 100) throw new Error(`Progress refresh flood: ${JSON.stringify(notifications)}`);
-    console.log(`PASS: 200-file fork sent ${notifications.manager} manager updates and ${notifications.launcher} launcher update`);
+    if (notifications.launcher !== 1 || notifications.launcherOperations || notifications.manager !== 1 || notifications.managerOperations >= 100) throw new Error(`Progress refresh flood: ${JSON.stringify(notifications)}`);
+    console.log(`PASS: 200-file fork sent ${notifications.managerOperations} operation updates and ${notifications.manager} full refresh to the manager, ${notifications.launcher} to the launcher`);
     await fs.mkdir('artifacts', { recursive: true });
     await page.screenshot({ path: 'artifacts/performance-recovery.png' });
     if (errors.length) throw new Error(errors.join('\n'));

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { LaunchQueue, spawnBrowser } from '../electron/launch';
-import { coalesceRefresh, progressNotifier } from '../shared/performance';
+import { coalesceRefresh, limiter, mapLimit, progressNotifier, reuse } from '../shared/performance';
 import { groupProfiles, searchProfiles } from '../shared/search';
 import { emptyProxy, type Profile } from '../shared/types';
 
@@ -75,6 +75,49 @@ describe('refresh scheduling', () => {
     const read = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined);
     const refresh = coalesceRefresh(read); await expect(refresh()).rejects.toThrow('offline'); await refresh();
     expect(read).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('structural sharing', () => {
+  it('keeps unchanged objects identical and replaces only what changed', () => {
+    const prev = { profiles: [profile(1), profile(2), profile(3)], settings: { theme: 'light' }, operations: [] as { id: string; done: number }[] };
+    const same = JSON.parse(JSON.stringify(prev));
+    expect(reuse(prev, same)).toBe(prev);
+    const next = JSON.parse(JSON.stringify(prev)); next.profiles[1].name = 'Renamed';
+    const shared = reuse(prev, next);
+    expect(shared).not.toBe(prev); expect(shared.profiles[0]).toBe(prev.profiles[0]); expect(shared.profiles[2]).toBe(prev.profiles[2]);
+    expect(shared.profiles[1]).not.toBe(prev.profiles[1]); expect(shared.profiles[1].proxy).toBe(prev.profiles[1].proxy); expect(shared.settings).toBe(prev.settings);
+    expect(shared).toEqual(next);
+  });
+  it('matches array items by id across reordering, insertion and removal', () => {
+    const prev = [profile(1), profile(2), profile(3)];
+    const next = JSON.parse(JSON.stringify([prev[2], profile(4), prev[0]]));
+    const shared = reuse(prev, next);
+    expect(shared[0]).toBe(prev[2]); expect(shared[2]).toBe(prev[0]); expect(shared).toEqual(next);
+    expect(reuse(prev, JSON.parse(JSON.stringify(prev.slice(0, 2))))).toEqual(prev.slice(0, 2));
+    expect(reuse({ a: 1, b: 2 }, { a: 1 })).toEqual({ a: 1 });
+  });
+  it('shares 1000 unchanged profiles quickly', () => {
+    const prev = Array.from({ length: 1000 }, (_, i) => profile(i)); const next = JSON.parse(JSON.stringify(prev));
+    const start = performance.now(); expect(reuse(prev, next)).toBe(prev);
+    console.log(`structural sharing for 1000 profiles: ${(performance.now() - start).toFixed(1)} ms`);
+  });
+});
+
+describe('bounded concurrency', () => {
+  it('never exceeds the limit and runs every task', async () => {
+    const run = limiter(3); let active = 0, maximum = 0;
+    const results = await Promise.all(Array.from({ length: 20 }, (_, i) => run(async () => { maximum = Math.max(maximum, ++active); await new Promise(r => setTimeout(r, 2)); active--; return i; })));
+    expect(maximum).toBe(3); expect(results).toEqual(Array.from({ length: 20 }, (_, i) => i));
+  });
+  it('stops starting work after a failure and settles only after in-flight work', async () => {
+    const started: number[] = []; let inFlight = 0; let inFlightAtSettle = -1;
+    const promise = mapLimit(Array.from({ length: 50 }, (_, i) => i), 4, async i => {
+      started.push(i); inFlight++;
+      try { await new Promise(r => setTimeout(r, i === 1 ? 1 : 10)); if (i === 1) throw new Error('copy failed'); } finally { inFlight--; }
+    });
+    await expect(promise.finally(() => { inFlightAtSettle = inFlight; })).rejects.toThrow('copy failed');
+    expect(inFlightAtSettle).toBe(0); expect(started.length).toBeLessThan(10);
   });
 });
 

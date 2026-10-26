@@ -1,5 +1,28 @@
 # v0.2.0 verification
 
+## 0.2.2 performance update — 2026-10-26
+
+Measured on the same Windows 10 machine, before and after, with disposable data:
+
+| Area | 0.2.1 | 0.2.2 |
+| --- | --- | --- |
+| Launch: in-use check before spawning | 2.1–2.7 s process query | 7–17 ms end to end (lockfile) |
+| Cold start to first window | 2.9 s | 0.57–0.64 s |
+| 1,000 rows visible after start | 3.7 s | 0.87 s |
+| Fork, 2,400 files, with live browser checks | 43.3 s | 2.1 s |
+| Storage scan, 4,200 files | 2.7 s | 0.39 s |
+| Cache preview / cleanup, 1,800 files | 2.8 s / 14.6 s | 0.40 s / 0.56 s |
+| Manager checkbox, menu, keystroke (1,000 profiles) | 83–217 ms | next frame (33 ms floor, 2 frames) |
+| First quick launcher open | 446 ms | 55–124 ms |
+| Snapshot transfer (1,000 profiles) | 15 ms structured copy | ~4 ms JSON text including parsing |
+| Manager DOM nodes / renderer memory | 25,000 / 303 MB | 2,800 / 127 MB |
+
+- All 70 unit tests and the production build pass. New tests cover junctions anywhere on a path, the background closure monitor and its final check, cleanup stopping when a browser starts, exact parallel copies and size totals, cached save validation, structural sharing, bounded concurrency, tasklist and registry parsing (including localized output), and the lockfile probe.
+- The manager, feature, and performance Electron suites pass against the development build. Manager, feature, and launch-browser suites pass against the packaged executable.
+- The new `scripts/launch-browser-smoke.cjs` starts a real headless Chrome through Chromatic with a disposable profile. It confirmed first launch (13 ms), relaunch of a running folder (9 ms), refusal of changed settings while running (3 ms), the process-query fallback shortly after a launch (1.8 s), and a lockfile-only launch afterwards (7 ms). Edge and Brave were separately confirmed to hold the lock while running and release it on exit; Brave took ~550 ms to create it, which the fallback covers.
+- `scripts/fork-browser-smoke.cjs` passed for real Chrome and Edge with the parallel copy.
+- The 0.2.2 NSIS installer was built and installed silently over the existing 0.2.1 per-user installation on this machine. Settings were byte-identical before and after.
+
 ## 0.2.1 launcher responsiveness update — 2026-10-15
 
 - All 50 unit tests and the production build pass. The manager and feature Electron smoke suites pass with the new launch recovery UI.

@@ -1,10 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Copy, GitFork, Tag, ArrowDownUp, ArrowRight, Check, ChevronDown, CircleHelp, Command, Download, Ellipsis, EyeOff, FolderOpen, Globe, HardDrive, Keyboard, Layers3, LockKeyhole, Plus, Search, Settings2, ShieldCheck, Sparkles, Star, Trash2, UnlockKeyhole, X } from 'lucide-react';
 import { emptyProxy } from '../shared/types';
-import { HeaderFeedback, LabelInput, ProfileLabels, ProxyFields, Operations, StoragePage } from './features';
-import type { Api, Browser, Candidate, Profile, ProfileDraft, Settings, SlimPreview, SlimResult, Snapshot } from '../shared/types';
-import { coalesceRefresh } from '../shared/performance';
+import { HeaderFeedback, LabelInput, ProfileLabels, ProxyFields, Operations, StoragePage, useProgressive } from './features';
+import type { Api, Browser, Candidate, Operation, Profile, ProfileDraft, Settings, SlimPreview, SlimResult, Snapshot } from '../shared/types';
+import { coalesceRefresh, reuse } from '../shared/performance';
 import { groupProfiles, searchProfiles } from '../shared/search';
 import './styles.css';
 declare global { interface Window { chromatic: Api } }
@@ -14,6 +14,7 @@ const colors = ['#8070c6', '#4e8a76', '#b8784b', '#668eae', '#b36789', '#a69a50'
 const bytes = (n: number) => n < 1024 ? `${n} B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : n < 1024 ** 3 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`;
 const lines = (text: string) => text.split('\n').map(s => s.trim()).filter(Boolean);
 const initials = (name: string) => name.split(/\s+/).slice(0, 2).map(s => s[0]).join('').toUpperCase();
+const readSnapshot = async () => JSON.parse(await api.snapshotText()) as Snapshot;
 function BrowserMark({ browser }: { browser?: Browser }) { return <span className={`browser-mark ${browser?.family || ''}`} title={browser?.name}><Globe size={14}/>{browser?.name || 'Browser unavailable'}</span>; }
 function Avatar({ profile }: { profile: Profile | ProfileDraft }) { return <span className="avatar" style={{ '--profile-color': profile.color } as React.CSSProperties}>{initials(profile.name || 'New profile')}</span>; }
 function App() {
@@ -31,9 +32,18 @@ function App() {
   const seenPending = useRef(''); const previousUnlock = useRef(false);
   const launchPending = useRef(new Set<string>());
   const [launching, setLaunching] = useState<string[]>([]);
-  const refresh = useMemo(() => coalesceRefresh(async () => {
+  const latest = useRef<Snapshot | undefined>(undefined); const wantsSnapshot = useRef(true);
+  // One queue for both kinds of read keeps them ordered: a read always starts after the
+  // notification that asked for it. Progress notifications reread only operations, and
+  // reuse() keeps unchanged data identical so memoized rows skip rendering.
+  const refresh = useMemo(() => { const read = coalesceRefresh(async () => {
     try {
-      const next = await api.snapshot(); setState(next); document.documentElement.style.colorScheme = next.settings.theme === 'system' ? 'light dark' : next.settings.theme;
+      if (!wantsSnapshot.current && latest.current) {
+        const operations = JSON.parse(await api.operationsText()) as Operation[];
+        const next = reuse(latest.current, { ...latest.current, operations }); latest.current = next; setState(next); return;
+      }
+      wantsSnapshot.current = false;
+      const next = reuse(latest.current, await readSnapshot()); latest.current = next; setState(next); document.documentElement.style.colorScheme = next.settings.theme === 'system' ? 'light dark' : next.settings.theme;
       if (previousUnlock.current && !next.unlocked) { setEdit(undefined); setSelected([]); setSlim(null); setResults(null); setMenu(null); setNotice(''); setError(''); setCopy(null); setBulkLabels(false); setRecovery(undefined); setLabelFilter(''); }
       previousUnlock.current = next.unlocked;
       if (next.pending) {
@@ -41,25 +51,36 @@ function App() {
         else if (next.pending.action === 'edit' && seenPending.current !== next.pending.id) { const target = next.profiles.find(p => p.id === next.pending!.id); if (target) setEdit(toDraft(target)); seenPending.current = next.pending.id; void api.clearPending(); }
       } else seenPending.current = '';
     } catch (e: any) { setError(e.message); }
-  }), []);
-  useEffect(() => { void refresh(); return api.onChange(() => { void refresh(); }); }, [refresh]);
+  }); return Object.assign(() => { wantsSnapshot.current = true; return read(); }, { operations: () => read() }); }, []);
+  useEffect(() => { void refresh(); const offChange = api.onChange(() => { void refresh(); }); const offOperations = api.onOperations(() => { void refresh.operations(); }); return () => { offChange(); offOperations(); }; }, [refresh]);
   useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(''), 6000); return () => clearTimeout(t); }, [notice]);
   useEffect(() => {
-    const focus = () => { if (quick) { setQuery(''); setFocusIndex(0); setError(''); setMenu(null); searchRef.current?.focus(); } };
-    window.addEventListener('focus', focus); return () => window.removeEventListener('focus', focus);
+    // Reset as the launcher hides too, so it reopens on a fresh list instead of flashing the last search.
+    const reset = () => { if (quick) { setQuery(''); setFocusIndex(0); setError(''); setMenu(null); } };
+    const focus = () => { reset(); if (quick) searchRef.current?.focus(); };
+    window.addEventListener('focus', focus); window.addEventListener('blur', reset);
+    return () => { window.removeEventListener('focus', focus); window.removeEventListener('blur', reset); };
   }, []);
   useEffect(() => {
     let last = 0; const activity = () => { if (Date.now() - last > 1000) { api.activity(); last = Date.now(); } };
     window.addEventListener('pointerdown', activity); window.addEventListener('keydown', activity);
     return () => { window.removeEventListener('pointerdown', activity); window.removeEventListener('keydown', activity); };
   }, []);
-  const run = async (fn: () => Promise<unknown>, message?: string) => { setBusy(true); setError(''); setRecovery(undefined); try { await fn(); if (message) setNotice(message); await refresh(); } catch (e: any) { setError(e.message); setRecovery({ code: e.code, profileId: e.profileId }); } finally { setBusy(false); } };
+  const run = useCallback(async (fn: () => Promise<unknown>, message?: string) => { setBusy(true); setError(''); setRecovery(undefined); try { await fn(); if (message) setNotice(message); await refresh(); } catch (e: any) { setError(e.message); setRecovery({ code: e.code, profileId: e.profileId }); } finally { setBusy(false); } }, [refresh]);
+  const browsers = useMemo(() => new Map((state?.browsers || []).map(b => [b.id, b])), [state?.browsers]);
+  const selectedIds = useMemo(() => new Set(selected), [selected]); const launchingIds = useMemo(() => new Set(launching), [launching]);
   const names = useMemo(() => Object.fromEntries((state?.browsers || []).map(b => [b.id, b.name])), [state?.browsers]);
   const profiles = useMemo(() => searchProfiles((state?.profiles || []).filter(p => (!quick || !p.hidden) && (page !== 'favorites' || p.favorite) && (page !== 'recent' || p.lastUsed) && (!labelFilter || p.labels.some(l => l.toLocaleLowerCase() === labelFilter.toLocaleLowerCase()))), query, names), [state?.profiles, page, query, names, labelFilter]);
   const labelOptions = useMemo(() => quick ? [] : [...new Map((state?.profiles || []).flatMap(p => p.labels).map(l => [l.toLocaleLowerCase(), l])).values()].sort((a, b) => a.localeCompare(b)), [state?.profiles]);
   const ordered = useMemo(() => !state || query || quick ? profiles : [...profiles].sort((a, b) => state.settings.sortBy === 'name' ? a.name.localeCompare(b.name) : state.settings.sortBy === 'recent' ? (b.lastUsed || 0) - (a.lastUsed || 0) : Number(b.favorite) - Number(a.favorite) || (b.lastUsed || 0) - (a.lastUsed || 0)), [profiles, state?.settings.sortBy, query]);
   const groups = useMemo(() => quick ? [] : state?.settings.groupBy === 'label' ? groupProfiles(ordered, labelOptions, labelFilter) : [{ label: '', profiles: ordered }], [ordered, labelOptions, labelFilter, state?.settings.groupBy]);
   useEffect(() => { setFocusIndex(0); }, [query, page]);
+  const rowTotal = useMemo(() => groups.reduce((n, g) => n + g.profiles.length, 0), [groups]);
+  const managerRows = useProgressive(rowTotal, [page, query, labelFilter, state?.settings.groupBy, state?.settings.sortBy].join('\n'), '.main', 100, 91);
+  const quickRows = useProgressive(profiles.length, query, '.quick-list', 50);
+  // Keyboard selection can move past the rendered page; render through the selected row.
+  const quickCount = Math.max(quickRows.count, focusIndex + 1);
+  const shownGroups = useMemo(() => { let left = managerRows.count; return groups.flatMap(g => { if (left <= 0) return []; const rows = g.profiles.slice(0, left); left -= rows.length; return [{ ...g, rows }]; }); }, [groups, managerRows.count]);
   useEffect(() => { if (quick) document.querySelector('.quick-row.active')?.scrollIntoView({ block: 'nearest' }); }, [focusIndex]);
   const launchProfile = useCallback(async (id: string) => {
     if (launchPending.current.has(id)) return;
@@ -68,7 +89,7 @@ function App() {
     const report = async (failure: { message: string; code?: string; profileId?: string }) => {
       // Accepted requests already have persistent recovery in Operations. Only
       // admission/IPC failures need an inline error in the initiating window.
-      const snapshot = await api.snapshot().catch(() => undefined);
+      const snapshot = await readSnapshot().catch(() => undefined);
       if (snapshot && !snapshot.profiles.some(p => p.id === id)) return;
       if (!quick && snapshot?.operations.some(o => o.type === 'launch' && o.profileIds.includes(id) && o.status === 'error' && o.message === failure.message)) return;
       setError(failure.message); setRecovery(failure);
@@ -82,8 +103,11 @@ function App() {
     } finally { launchPending.current.delete(id); setLaunching([...launchPending.current]); }
   }, []);
   const exportProfiles = (ids: string[]) => run(async () => { const count = await api.exportProfiles(ids); if (count) setNotice(`Exported ${count} profile ${count === 1 ? 'file' : 'files'}.`); else setNotice('No new files exported. Existing files were kept.'); });
-  const preview = (ids: string[]) => run(async () => { setResults(null); setSlim(await api.previewSlim(ids)); });
-  const openMenu = (event: React.MouseEvent, id: string) => { event.preventDefault(); setMenu({ id, x: Math.min(event.clientX, innerWidth - 235), y: Math.min(event.clientY, innerHeight - 385) }); };
+  // Stable callbacks let memoized rows skip rendering when the list itself is unchanged.
+  const preview = useCallback((ids: string[]) => run(async () => { setResults(null); setSlim(await api.previewSlim(ids)); }), [run]);
+  const openMenu = useCallback((event: React.MouseEvent, id: string) => { event.preventDefault(); setMenu({ id, x: Math.min(event.clientX, innerWidth - 235), y: Math.min(event.clientY, innerHeight - 385) }); }, []);
+  const toggleSelected = useCallback((id: string, checked: boolean) => setSelected(s => checked ? [...s, id] : s.filter(other => other !== id)), []);
+  const toggleFavorite = useCallback((p: Profile) => run(() => api.save({ ...toDraft(p), favorite: !p.favorite })), [run]);
   const changePage = (next: typeof page) => { setPage(next); setQuery(''); setSelected([]); setEdit(undefined); setLabelFilter(''); };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -100,7 +124,7 @@ function App() {
     if (e.key === 'Enter' && profiles[focusIndex]) { e.preventDefault(); void launchProfile(profiles[focusIndex].id); }
   }}/>{query ? <button aria-label="Clear search" onClick={() => setQuery('')}><X size={16}/></button> : <kbd>{quick ? 'esc' : 'Ctrl K'}</kbd>}</div>;
   const empty = <div className="empty"><div className="empty-icon"><Layers3 size={32}/></div><h2>{query ? 'No matching profiles' : page === 'favorites' ? 'Keep your regulars close' : page === 'recent' ? 'Your next session starts here' : 'A place for every side of you'}</h2><p>{query ? 'Try a profile name, browser, or label.' : 'Separate work, projects, and everything else. Add a browser profile to get started.'}</p>{!quick && !query && <div className="button-row"><button className="primary" onClick={() => setEdit(null)}><Plus size={16}/>Create profile</button><button className="secondary" onClick={() => run(async () => setCandidates(await api.discover()))}>Find existing profiles</button></div>}</div>;
-  if (quick) return <div className="quick-shell">{searchBox}{messages}<div className="quick-label">{query ? `${profiles.length} matching profiles` : 'Your profiles'}<span>CHROMATIC</span></div><div className="quick-list" id="quick-results" role="listbox" aria-label="Profile results">{!profiles.length ? empty : profiles.map((p, i) => <button key={p.id} id={`result-${p.id}`} role="option" aria-selected={i === focusIndex} className={`quick-row ${i === focusIndex ? 'active' : ''}`} aria-disabled={launching.includes(p.id)} onMouseEnter={() => setFocusIndex(i)} onClick={() => launchProfile(p.id)} onContextMenu={e => openMenu(e, p.id)}><Avatar profile={p}/><span className="row-identity"><strong>{p.name}</strong><span>{names[p.browserId]}{p.labels.length ? ` · ${p.labels.join(', ')}` : ''}</span></span>{p.favorite && <Star size={15} className="favorite"/>}<ArrowRight size={18}/></button>)}</div><footer className="quick-footer"><span><kbd>↑</kbd><kbd>↓</kbd> navigate <kbd>↵</kbd> launch</span><button onClick={() => api.manager()}>Manage profiles <ArrowRight size={14}/></button></footer>{menu && <ContextMenu menu={menu} close={() => setMenu(null)} profile={state.profiles.find(p => p.id === menu.id)!} onEdit={p => void api.manager(p.id)} onFavorite={p => void api.manager(p.id)} onHide={p => void api.manager(p.id)} onExport={p => void api.manager(p.id)} onSlim={p => void api.manager(p.id)}/>}</div>;
+  if (quick) return <div className="quick-shell">{searchBox}{messages}<div className="quick-label">{query ? `${profiles.length} matching profiles` : 'Your profiles'}<span>CHROMATIC</span></div><div className="quick-list" id="quick-results" role="listbox" aria-label="Profile results">{!profiles.length ? empty : <>{profiles.slice(0, quickCount).map((p, i) => <QuickRow key={p.id} profile={p} index={i} active={i === focusIndex} browserName={names[p.browserId]} launching={launchingIds.has(p.id)} onHover={setFocusIndex} onLaunch={launchProfile} onMenu={openMenu}/>)}{quickRows.sentinel}</>}</div><footer className="quick-footer"><span><kbd>↑</kbd><kbd>↓</kbd> navigate <kbd>↵</kbd> launch</span><button onClick={() => api.manager()}>Manage profiles <ArrowRight size={14}/></button></footer>{menu && <ContextMenu menu={menu} close={() => setMenu(null)} profile={state.profiles.find(p => p.id === menu.id)!} onEdit={p => void api.manager(p.id)} onFavorite={p => void api.manager(p.id)} onHide={p => void api.manager(p.id)} onExport={p => void api.manager(p.id)} onSlim={p => void api.manager(p.id)}/>}</div>;
   return <div className="app-shell" onClick={() => menu && setMenu(null)}>
     <aside className="sidebar"><div className="brand"><img src={new URL('../assets/icon.svg', import.meta.url).href} alt=""/><span>chromatic<span className="brand-dot">.</span></span></div><div className="workspace-caption">YOUR WORKSPACE</div><nav aria-label="Main navigation">
       <Nav icon={<Layers3 size={18}/>} label="All profiles" active={page === 'all'} onClick={() => changePage('all')} count={state.profiles.length}/>
@@ -117,7 +141,7 @@ function App() {
       {state.unlocked && <div className="unlock-notice"><UnlockKeyhole size={15}/>Discreet profiles are visible in this manager.<button onClick={() => run(() => api.lock())}>Lock now</button></div>}
       <div className="view-controls"><label>Filter label<select value={labelFilter} onChange={e => { setLabelFilter(e.target.value); setSelected([]); }}><option value="">All labels</option>{labelOptions.map(l => <option key={l}>{l}</option>)}</select></label><label>Group by<select value={state.settings.groupBy} onChange={e => run(() => api.settings({ ...state.settings, groupBy: e.target.value as Settings['groupBy'] }))}><option value="none">None</option><option value="label">Label</option></select></label><label>Sort by<select value={state.settings.sortBy} onChange={e => run(() => api.settings({ ...state.settings, sortBy: e.target.value as Settings['sortBy'] }))}><option value="favorites">Favorites first</option><option value="name">Name</option><option value="recent">Recently used</option></select></label></div>
       <div className="list-heading"><span>{selected.length ? `${selected.length} selected` : `${profiles.length} ${profiles.length === 1 ? 'profile' : 'profiles'}`}</span>{selected.length ? <div className="button-row"><button onClick={() => setBulkLabels(true)}><Tag size={14}/>Labels</button><button onClick={() => exportProfiles(selected)}><Download size={14}/>Export</button><button onClick={() => preview(selected)}><HardDrive size={14}/>Slim profiles</button><button onClick={() => setSelected([])}>Clear</button></div> : <button onClick={() => setSelected(profiles.map(p => p.id))}>Select all</button>}</div>
-      {!profiles.length ? empty : <div className="profile-list">{groups.map(group => <section key={group.label || 'all'}>{group.label && <h2 className="group-heading">{group.label}<span>{group.profiles.length}</span></h2>}{group.profiles.map(p => <div className="profile-row" key={p.id} onContextMenu={e => openMenu(e, p.id)}><input className="row-check" type="checkbox" aria-label={`Select ${p.name}`} checked={selected.includes(p.id)} onChange={e => setSelected(s => e.target.checked ? [...s, p.id] : s.filter(id => id !== p.id))}/><Avatar profile={p}/><button className="profile-identity" disabled={launching.includes(p.id)} onClick={() => launchProfile(p.id)}><strong>{p.name}{p.hidden && <EyeOff size={14} aria-label="Hidden"/>}</strong><BrowserMark browser={state.browsers.find(b => b.id === p.browserId)}/></button><ProfileLabels profile={p} active={labelFilter || group.label}/><button className={`icon-button ${p.favorite ? 'favorite' : ''}`} aria-label={`${p.favorite ? 'Unfavorite' : 'Favorite'} ${p.name}`} onClick={() => run(() => api.save({ ...toDraft(p), favorite: !p.favorite }))}><Star size={17} fill={p.favorite ? 'currentColor' : 'none'}/></button><button className="launch-button" disabled={launching.includes(p.id)} onClick={() => launchProfile(p.id)}>{launching.includes(p.id) ? 'Launching…' : 'Launch'} <ArrowRight size={15}/></button><button className="icon-button" aria-label={`Actions for ${p.name}`} onClick={e => { e.stopPropagation(); openMenu(e, p.id); }}><Ellipsis size={19}/></button></div>)}</section>)}</div>}
+      {!profiles.length ? empty : <div className="profile-list">{shownGroups.map(group => <section key={group.label || 'all'}>{group.label && <h2 className="group-heading">{group.label}<span>{group.profiles.length}</span></h2>}{group.rows.map(p => <ProfileRow key={p.id} profile={p} browser={browsers.get(p.browserId)} activeLabel={labelFilter || group.label} selected={selectedIds.has(p.id)} launching={launchingIds.has(p.id)} onSelect={toggleSelected} onLaunch={launchProfile} onFavorite={toggleFavorite} onMenu={openMenu}/>)}</section>)}{managerRows.sentinel}</div>}
       <div className="library-footer"><ShieldCheck size={16}/><span>Browser data stays on your computer.</span><button onClick={() => setPage('settings')}>Launcher preferences <ArrowRight size={14}/></button></div>
       </>}
       </div></main>
@@ -131,6 +155,16 @@ function App() {
   </div>;
 }
 function toDraft(p: Profile): ProfileDraft { const { createdAt, lastUsed, ...draft } = p; return draft; }
+// Rows take only primitive flags and stable callbacks, so with unchanged profile objects
+// (see reuse()) a selection, menu, or progress update re-renders just the affected rows.
+const ProfileRow = memo(function ProfileRow({ profile: p, browser, activeLabel, selected, launching, onSelect, onLaunch, onFavorite, onMenu }: { profile: Profile; browser?: Browser; activeLabel: string; selected: boolean; launching: boolean; onSelect(id: string, checked: boolean): void; onLaunch(id: string): void; onFavorite(p: Profile): void; onMenu(e: React.MouseEvent, id: string): void }) {
+  return <div className="profile-row" onContextMenu={e => onMenu(e, p.id)}><input className="row-check" type="checkbox" aria-label={`Select ${p.name}`} checked={selected} onChange={e => onSelect(p.id, e.target.checked)}/><Avatar profile={p}/><button className="profile-identity" disabled={launching} onClick={() => onLaunch(p.id)}><strong>{p.name}{p.hidden && <EyeOff size={14} aria-label="Hidden"/>}</strong><BrowserMark browser={browser}/></button><ProfileLabels profile={p} active={activeLabel}/><button className={`icon-button ${p.favorite ? 'favorite' : ''}`} aria-label={`${p.favorite ? 'Unfavorite' : 'Favorite'} ${p.name}`} onClick={() => onFavorite(p)}><Star size={17} fill={p.favorite ? 'currentColor' : 'none'}/></button><button className="launch-button" disabled={launching} onClick={() => onLaunch(p.id)}>{launching ? 'Launching…' : 'Launch'} <ArrowRight size={15}/></button><button className="icon-button" aria-label={`Actions for ${p.name}`} onClick={e => { e.stopPropagation(); onMenu(e, p.id); }}><Ellipsis size={19}/></button></div>;
+});
+// Hover follows real pointer movement only. mouseenter also fires when the list changes or
+// the launcher opens under a resting cursor, which stole the keyboard selection.
+const QuickRow = memo(function QuickRow({ profile: p, index, active, browserName, launching, onHover, onLaunch, onMenu }: { profile: Profile; index: number; active: boolean; browserName?: string; launching: boolean; onHover(index: number): void; onLaunch(id: string): void; onMenu(e: React.MouseEvent, id: string): void }) {
+  return <button id={`result-${p.id}`} role="option" aria-selected={active} className={`quick-row ${active ? 'active' : ''}`} aria-disabled={launching} onMouseMove={() => { if (!active) onHover(index); }} onClick={() => onLaunch(p.id)} onContextMenu={e => onMenu(e, p.id)}><Avatar profile={p}/><span className="row-identity"><strong>{p.name}</strong><span>{browserName}{p.labels.length ? ` · ${p.labels.join(', ')}` : ''}</span></span>{p.favorite && <Star size={15} className="favorite"/>}<ArrowRight size={18}/></button>;
+});
 function Nav({ icon, label, active, onClick, count }: { icon: React.ReactNode; label: string; active: boolean; onClick(): void; count?: number }) { return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick} aria-current={active ? 'page' : undefined}>{icon}<span>{label}</span>{count !== undefined && <span className="nav-count">{count}</span>}</button>; }
 function PageHeading({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) { return <div className="page-heading"><div><h1>{title}</h1><p>{description}</p></div>{action}</div>; }
 function ContextMenu({ menu, close, profile, onEdit, onFavorite, onHide, onExport, onSlim, onCopy }: { menu: { x: number; y: number }; close(): void; profile: Profile; onEdit(p: Profile): void; onFavorite(p: Profile): void; onHide(p: Profile): void; onExport(p: Profile): void; onSlim(p: Profile): void; onCopy?(p: Profile, mode: 'duplicate' | 'fork'): void }) {
@@ -151,12 +185,13 @@ function Editor({ draft, state, busy, error, close, save, remove, chooseFolder }
   const [form, setForm] = useState<ProfileDraft>(draft || { name: '', browserId: state.browsers.find(b => b.isDefault)?.id || state.browsers[0]?.id || '', kind: 'managed', dataDir: '', labels: [], color: colors[0], favorite: false, hidden: false, urls: [], flags: [], extensions: [], proxy: emptyProxy(), noDefaultFlags: false });
   const [advanced, setAdvanced] = useState(false); const [confirmRemove, setConfirmRemove] = useState(false);
   const b = state.browsers.find(b => b.id === form.browserId);
+  const suggestions = useMemo(() => [...new Set(state.profiles.flatMap(p => p.labels))], [state.profiles]);
   const set = <K extends keyof ProfileDraft>(key: K, value: ProfileDraft[K]) => setForm(s => ({ ...s, [key]: value }));
   return <Overlay title={draft ? 'Edit profile' : 'Create a profile'} close={close} wide side><form onSubmit={e => { e.preventDefault(); save(form); }}><div className="dialog-body editor-body">
     <div className="identity-preview"><Avatar profile={form}/><div><strong>{form.name || 'Your new space'}</strong><p>{b?.name || 'Choose a browser below'}</p></div><div className="color-picker">{colors.map(c => <button key={c} type="button" className={form.color === c ? 'chosen' : ''} style={{ backgroundColor: c }} aria-label={`Profile color ${c}`} aria-pressed={form.color === c} onClick={() => set('color', c)}>{form.color === c && <Check size={12}/>}</button>)}</div></div>
     <label>Profile name<input required maxLength={120} autoFocus placeholder="e.g. Work, Personal, Side project" value={form.name} onChange={e => set('name', e.target.value)}/></label>
     <div className="form-grid"><label>Browser<select aria-label="Browser" required disabled={!!draft} value={form.browserId} onChange={e => set('browserId', e.target.value)}><option value="">Choose a browser</option>{state.browsers.map(b => <option key={b.id} value={b.id}>{b.name}{b.isDefault ? ' (system default)' : ''}</option>)}</select></label><label>Profile type<select aria-label="Profile type" disabled={!!draft} value={form.kind} onChange={e => set('kind', e.target.value as 'managed' | 'existing')}><option value="managed">New isolated profile</option><option value="existing">Existing profile folder</option></select></label></div>
-    <LabelInput value={form.labels} onChange={v => set('labels', v)} suggestions={[...new Set(state.profiles.flatMap(p => p.labels))]}/>
+    <LabelInput value={form.labels} onChange={v => set('labels', v)} suggestions={suggestions}/>
     <label>Startup URLs <span className="optional">one per line</span><textarea rows={2} placeholder="https://example.com" defaultValue={form.urls.join('\n')} onChange={e => set('urls', lines(e.target.value))}/></label>
     <div className="form-grid"><label className="check-label"><input type="checkbox" checked={form.favorite} onChange={e => set('favorite', e.target.checked)}/>Add to favorites</label><label className="check-label"><input type="checkbox" checked={form.hidden} disabled={!state.unlocked} onChange={e => set('hidden', e.target.checked)}/>Hide from launcher</label></div>{!state.unlocked && <p className="hint">Set or unlock your PIN in Settings to hide profiles.</p>}
     <ProxyFields value={form.proxy} onChange={v => set('proxy', v)} profileId={draft?.id} operations={state.operations}/>

@@ -23,6 +23,9 @@ export interface Api {
   locateBrowser(id: string): Promise<void>;
   openFolder(id: string): Promise<void>;
   snapshot(): Promise<Snapshot>;
+  // JSON text of snapshot() and of its operations, parsed in the page (much cheaper to transfer).
+  snapshotText(): Promise<string>;
+  operationsText(): Promise<string>;
   save(draft: ProfileDraft): Promise<Profile>;
   remove(id: string): Promise<void>;
   launch(id: string): Promise<void | { error: { code: string; profileId: string; message: string } }>;
@@ -43,6 +46,8 @@ export interface Api {
   dismiss(): Promise<void>;
   activity(): void;
   onChange(callback: () => void): () => void;
+  // Fires when only operation progress or status changed.
+  onOperations(callback: () => void): () => void;
 }
 
 export interface ProxyConfig { mode: 'system' | 'server' | 'review'; protocol: 'http' | 'https' | 'socks5'; host: string; port: number; username: string; hasPassword?: boolean; password?: string; clearPassword?: boolean; legacy?: string }

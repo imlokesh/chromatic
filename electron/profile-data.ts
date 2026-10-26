@@ -2,6 +2,7 @@ import { promises as fs, constants } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { noLinks } from './cleanup';
+import { limiter, mapLimit } from '../shared/performance';
 import type { Profile, StorageUsage } from '../shared/types';
 
 const caches = new Set(['Cache', 'Code Cache', 'GPUCache']);
@@ -15,21 +16,32 @@ export function duplicateProfile(source: Profile, root: string, name: string): P
   return { ...structuredClone(source), id, name, dataDir: path.join(root, 'Profiles', id), profileDir: source.profileDir || 'Default', kind: 'managed', favorite: false, lastUsed: undefined, createdAt: Date.now() };
 }
 type Entry = { full: string; relative: string; size: number; mtime: number; ino: number };
+const io = limiter(16);
 async function inventory(root: string, check: () => Promise<void>, excludeCache = false): Promise<Entry[]> {
   const out: Entry[] = [];
   async function walk(dir: string) {
     await check(); await noLinks(dir);
-    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+    const entries = await io(() => fs.readdir(dir, { withFileTypes: true }));
+    await Promise.all(entries.map(async entry => {
       const full = path.join(dir, entry.name), relative = path.relative(root, full);
-      if (excludeCache && (caches.has(relative.split(path.sep)[0]) || /^(Singleton.*|lockfile)$/i.test(entry.name))) continue;
+      if (excludeCache && (caches.has(relative.split(path.sep)[0]) || /^(Singleton.*|lockfile)$/i.test(entry.name))) return;
       if (entry.isSymbolicLink()) throw new Error('Linked files or folders cannot be forked.');
       if (entry.isDirectory()) await walk(full);
-      else if (entry.isFile()) { const s = await fs.lstat(full); if (s.nlink !== 1) throw new Error('Hard-linked files cannot be forked.'); out.push({ full, relative, size: s.size, mtime: s.mtimeMs, ino: s.ino }); }
-    }
+      else if (entry.isFile()) { const s = await io(() => fs.lstat(full)); if (s.nlink !== 1) throw new Error('Hard-linked files cannot be forked.'); out.push({ full, relative, size: s.size, mtime: s.mtimeMs, ino: s.ino }); }
+    }));
   }
-  await walk(root); return out;
+  // Parallel walks finish in any order; sort so inventories compare exactly.
+  await walk(root); return out.sort((a, b) => a.relative < b.relative ? -1 : a.relative > b.relative ? 1 : 0);
 }
-export async function forkProfile(source: Profile, target: Profile, check: () => Promise<void>, progress: (done: number, total: number) => void) {
+// A file must still be the same regular file: same identity, size and modification time.
+// lstat never follows a link, so a replaced file or a swapped parent folder fails this check.
+async function unchanged(entry: Entry) {
+  const s = await fs.lstat(entry.full);
+  return s.isFile() && s.nlink === 1 && s.size === entry.size && s.mtimeMs === entry.mtime && s.ino === entry.ino;
+}
+// `settle` runs after the final source verification and before the fork is published, for
+// checks that must cover the whole copy (such as confirming the browser stayed closed).
+export async function forkProfile(source: Profile, target: Profile, check: () => Promise<void>, progress: (done: number, total: number) => void, settle: () => Promise<void> = async () => {}) {
   const from = profilePath(source), destination = target.dataDir;
   // The caller supplies a newly allocated managed destination. Never replace a directory.
   await check(); await noLinks(source.dataDir);
@@ -44,18 +56,19 @@ export async function forkProfile(source: Profile, target: Profile, check: () =>
   const staging = await fs.mkdtemp(path.join(path.dirname(destination), '.fork-'));
   let done = 0;
   try {
-    await fs.mkdir(path.join(staging, target.profileDir || 'Default'));
-    for (const entry of entries) {
-      await check(); await noLinks(entry.full);
-      const before = await fs.stat(entry.full);
-      if (before.size !== entry.size || before.mtimeMs !== entry.mtime || before.ino !== entry.ino) throw new Error('Source data changed. Close the browser and retry.');
-      const to = path.join(staging, target.profileDir || 'Default', entry.relative);
-      await fs.mkdir(path.dirname(to), { recursive: true });
-      await fs.copyFile(entry.full, to, constants.COPYFILE_EXCL);
-      const after = await fs.stat(entry.full);
-      if (after.size !== entry.size || after.mtimeMs !== entry.mtime || after.ino !== entry.ino) throw new Error('Source data changed during the fork. Retry with the browser closed.');
+    const profileRoot = path.join(staging, target.profileDir || 'Default');
+    await fs.mkdir(profileRoot);
+    // Create each destination folder once, parents first, instead of once per file.
+    for (const dir of [...new Set(entries.map(e => path.dirname(e.relative)))].filter(d => d !== '.').sort()) await fs.mkdir(path.join(profileRoot, dir), { recursive: true });
+    // mapLimit stops starting copies after a failure and waits for those in flight, so the
+    // staging folder is never removed while a copy is still writing into it.
+    await mapLimit(entries, 8, async entry => {
+      await check();
+      if (!await unchanged(entry)) throw new Error('Source data changed. Close the browser and retry.');
+      await fs.copyFile(entry.full, path.join(profileRoot, entry.relative), constants.COPYFILE_EXCL);
+      if (!await unchanged(entry)) throw new Error('Source data changed during the fork. Retry with the browser closed.');
       done += entry.size; progress(done, total);
-    }
+    });
     if (state) {
       const parsed = JSON.parse(state.toString('utf8'));
       // Keep key material and browser-wide settings; remove sibling profile identities.
@@ -69,6 +82,7 @@ export async function forkProfile(source: Profile, target: Profile, check: () =>
     await check();
     const final = await inventory(from, check, true);
     if (JSON.stringify(final) !== JSON.stringify(entries) || (state && !state.equals(await fs.readFile(localState)))) throw new Error('Source data changed. The fork was not saved.');
+    await settle();
     try { await fs.access(destination); throw new Error('The destination already exists.'); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
     await fs.rename(staging, destination); progress(total, total);
   } catch (e) {
@@ -84,22 +98,25 @@ export async function scanProfileStorage(p: Profile, check: () => void): Promise
     check(); let total = 0;
     try {
       await noLinks(dir);
-      for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+      const entries = await io(() => fs.readdir(dir, { withFileTypes: true }));
+      await Promise.all(entries.map(async e => {
         check(); const full = path.join(dir, e.name);
-        if (e.isSymbolicLink()) { result.incomplete = true; continue; }
-        if (e.isDirectory()) total += await walk(full, cache || (dir === root && caches.has(e.name)));
-        else if (e.isFile()) { const stat = await fs.lstat(full); if (stat.isSymbolicLink() || stat.nlink !== 1) { result.incomplete = true; continue; } total += stat.size; if (cache) result.cacheBytes += stat.size; }
-      }
+        if (e.isSymbolicLink()) { result.incomplete = true; return; }
+        // Await first: `total += await …` would read total before siblings finish.
+        if (e.isDirectory()) { const size = await walk(full, cache || (dir === root && caches.has(e.name))); total += size; }
+        else if (e.isFile()) { const stat = await io(() => fs.lstat(full)); check(); if (stat.isSymbolicLink() || stat.nlink !== 1) { result.incomplete = true; return; } total += stat.size; if (cache) result.cacheBytes += stat.size; }
+      }));
     } catch (e: any) { check(); if (e.code !== 'ENOENT') result.incomplete = true; }
     return total;
   }
   result.bytes = await walk(root, false);
   try {
     await noLinks(p.dataDir);
-    for (const e of await fs.readdir(p.dataDir, { withFileTypes: true })) {
+    const entries = (await fs.readdir(p.dataDir, { withFileTypes: true })).filter(e => e.isFile());
+    await Promise.all(entries.map(async e => {
       check();
-      if (e.isFile()) { const s = await fs.lstat(path.join(p.dataDir, e.name)); if (!s.isSymbolicLink() && s.nlink === 1) result.sharedBytes += s.size; }
-    }
+      const s = await io(() => fs.lstat(path.join(p.dataDir, e.name))); if (!s.isSymbolicLink() && s.nlink === 1) result.sharedBytes += s.size;
+    }));
   } catch (e: any) { check(); if (e.code !== 'ENOENT') result.incomplete = true; }
   if (result.incomplete) result.message = 'Some linked, changing, or unreadable files were skipped.';
   return result;

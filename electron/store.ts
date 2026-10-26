@@ -24,6 +24,9 @@ export type State = z.infer<typeof stateSchema>;
 export class Store {
   state: State = { version: 2, profiles: [], proxySecrets: {}, browsers: [], attempts: 0, blockedUntil: 0, settings: { hotkey: 'Ctrl+Alt+Space', startup: false, theme: 'system', defaultFlags: { chromium: ['--no-first-run', '--no-default-browser-check'] }, groupBy: 'none', sortBy: 'favorites' } };
   private queue: Promise<void> = Promise.resolve();
+  // Validated output keyed by profile id and its serialized input. Revalidating 1,000
+  // unchanged profiles took ~13 ms of main-process time on every save.
+  private validated = new Map<string, { input: string; output: Profile }>();
   constructor(public readonly root: string) {}
   async load() {
     await fs.mkdir(this.root, { recursive: true });
@@ -41,8 +44,22 @@ export class Store {
     }
     catch (error: any) { if (error.code !== 'ENOENT') throw new Error('Chromatic settings could not be read. The original file has been preserved. Restore settings.json from your backup before continuing.'); }
   }
+  // Everything written must load again, so each changed profile and the rest of the state
+  // are still validated before saving.
+  private valid(): State {
+    const next = new Map<string, { input: string; output: Profile }>();
+    const profiles = this.state.profiles.map(p => {
+      const input = JSON.stringify(p); const cached = this.validated.get(p.id);
+      const output = cached?.input === input ? cached.output : profileSchema.parse(p);
+      next.set(p.id, { input, output }); return output;
+    });
+    if (next.size !== profiles.length) return stateSchema.parse(this.state); // Duplicate ids: validate normally.
+    const state = stateSchema.parse({ ...this.state, profiles: [] });
+    state.profiles = profiles; this.validated = next;
+    return state;
+  }
   persist() {
-    const data = JSON.stringify(stateSchema.parse(this.state), null, 2);
+    const data = JSON.stringify(this.valid(), null, 2);
     this.queue = this.queue.catch(() => {}).then(async () => {
       const temp = path.join(this.root, 'settings.tmp');
       await fs.writeFile(temp, data, { mode: 0o600 });

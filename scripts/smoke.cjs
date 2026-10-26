@@ -3,6 +3,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
+// The launcher is created hidden ahead of time, so find its window rather than wait for a new one.
+async function launcherPage(app) { const find = () => app.windows().find(w => w.url().includes('mode=launcher')); await expect.poll(() => !!find(), { timeout: 15000 }).toBe(true); return find(); }
 (async () => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'chromatic-smoke-'));
   const appRoot = path.join(temp, 'Chromatic'); await fs.mkdir(appRoot);
@@ -50,7 +52,7 @@ const crypto = require('node:crypto');
     await expect(page.getByRole('dialog', { name: 'Unlock discreet profiles' })).toBeVisible();
     await page.getByLabel('Four-digit PIN', { exact: true }).fill('4826'); await page.getByRole('button', { name: 'Unlock profiles', exact: true }).click();
     await expect(page.getByRole('dialog', { name: 'Edit profile' })).toBeVisible(); await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-    const quickWindowPromise = app.waitForEvent('window'); await page.evaluate(() => window.chromatic.launcher()); const quickPage = await quickWindowPromise;
+    await page.evaluate(() => window.chromatic.launcher()); const quickPage = await launcherPage(app);
     await expect(quickPage.locator('.quick-row')).toHaveCount(4);
     if ((await quickPage.locator('.quick-list').innerText()).includes('Studio')) throw new Error('Hidden profile leaked into quick launcher');
     await quickPage.screenshot({ path: 'artifacts/launcher.png' }); await quickPage.getByRole('combobox', { name: 'Search profiles' }).fill('reading'); await expect(quickPage.locator('.quick-row')).toHaveCount(1);

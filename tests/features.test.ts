@@ -61,6 +61,23 @@ describe('duplicate and fork', () => {
     await expect(forkProfile(source, target, async () => { if (changed) await write(source.dataDir, 'Default/History', 'modified data'); }, () => { changed = true; })).rejects.toThrow('changed');
     expect(await fs.readdir(path.join(root, 'Profiles'))).toEqual([]);
   });
+  it('copies a large nested profile exactly with parallel copies and checks before publishing', async () => {
+    const root = await tmp(); const source = profile(path.join(root, 'source'));
+    const files: string[] = [];
+    for (let d = 0; d < 20; d++) for (let f = 0; f < 15; f++) { const rel = `Default/IndexedDB/site_${d}/leveldb/${f}.ldb`; files.push(rel); await write(source.dataDir, rel, `${rel}:${'x'.repeat(d * f)}`); }
+    for (let f = 0; f < 30; f++) await write(source.dataDir, `Default/Cache/Cache_Data/${f}`);
+    const target = duplicateProfile(source, root, 'Fork'); const events: string[] = []; let lastDone = 0, total = 0;
+    await forkProfile(source, target, async () => {}, (done, all) => { expect(done).toBeGreaterThanOrEqual(lastDone); lastDone = done; total = all; }, async () => { events.push('settle'); expect(await fs.access(target.dataDir).then(() => true, () => false)).toBe(false); });
+    expect(events).toEqual(['settle']); expect(lastDone).toBe(total);
+    for (const rel of files) expect(await fs.readFile(path.join(target.dataDir, rel), 'utf8')).toBe(await fs.readFile(path.join(source.dataDir, rel), 'utf8'));
+    expect(await fs.readdir(path.join(target.dataDir, 'Default'))).toEqual(['IndexedDB']);
+  });
+  it('does not publish a fork when the final check fails', async () => {
+    const root = await tmp(); const source = profile(path.join(root, 'source')); await write(source.dataDir, 'Default/Cookies');
+    const target = duplicateProfile(source, root, 'Fork');
+    await expect(forkProfile(source, target, async () => {}, () => {}, async () => { throw new Error('Browser started'); })).rejects.toThrow('Browser started');
+    expect(await fs.readdir(path.join(root, 'Profiles'))).toEqual([]);
+  });
   it('rejects junctions without reading or deleting their targets', async () => {
     const root = await tmp(); const source = profile(path.join(root, 'source')); const outside = path.join(root, 'outside'); await write(source.dataDir, 'Default/Cookies'); await write(outside, 'keep');
     await fs.symlink(outside, path.join(source.dataDir, 'Default/linked'), 'junction');
@@ -83,6 +100,12 @@ describe('storage inventory', () => {
     const root = await tmp(); await write(root, 'Default/Cookies', '12345'); await write(root, 'Default/Cache/data', '123'); await write(root, 'Local State', '12'); await write(root, 'Profile 1/Cookies', 'sibling');
     const row = await scanProfileStorage(profile(root), () => {}); expect(row.bytes).toBe(8); expect(row.cacheBytes).toBe(3); expect(row.sharedBytes).toBe(2); expect(row.incomplete).toBe(false);
     expect(await fs.readFile(path.join(root, 'Default/Cookies'), 'utf8')).toBe('12345');
+  });
+  it('sums deeply nested folders exactly when walking in parallel', async () => {
+    const root = await tmp(); let bytes = 0, cache = 0;
+    for (let d = 0; d < 12; d++) for (let f = 0; f < 8; f++) { const data = 'y'.repeat(d + f + 1); await write(root, `Default/Deep/a${d}/b/c${f % 3}/file${f}`, data); bytes += data.length; }
+    for (let f = 0; f < 10; f++) { await write(root, `Default/Code Cache/js/${f}`, '1234'); bytes += 4; cache += 4; }
+    const row = await scanProfileStorage(profile(root), () => {}); expect(row.bytes).toBe(bytes); expect(row.cacheBytes).toBe(cache); expect(row.incomplete).toBe(false);
   });
   it('honors cancellation and skips junctions', async () => {
     const root = await tmp(); await write(root, 'Default/Cookies'); const out = await tmp(); await write(out, 'keep'); await fs.symlink(out, path.join(root, 'Default/link'), 'junction');

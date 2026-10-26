@@ -6,7 +6,14 @@ import { defaultBrowserCommand } from './windows';
 export const exists = async (p: string) => fs.access(p).then(() => true, () => false);
 export const canonical = (p: string) => path.resolve(p).toLowerCase();
 export const browserId = (p: string) => createHash('sha256').update(canonical(p)).digest('hex').slice(0, 20);
-export async function detectBrowsers(saved: Browser[]): Promise<Browser[]> {
+export async function detectBrowsers(saved: Browser[]): Promise<Browser[]> { return mergeBrowsers(saved, await installedBrowsers()); }
+// Merge synchronously so a detection that finishes in the background cannot drop browsers saved meanwhile.
+export function mergeBrowsers(saved: Browser[], installed: { found: Browser[]; command: string }) {
+  const unique = new Map<string, Browser>();
+  for (const browser of [...saved, ...installed.found]) unique.set(browser.id, { ...browser, isDefault: installed.command.includes(browser.executable.toLowerCase()) });
+  return [...unique.values()];
+}
+export async function installedBrowsers() {
   const local = process.env.LOCALAPPDATA || '';
   const specs = [
     { name: 'Google Chrome', suffix: 'Google/Chrome/Application/chrome.exe', dataRoot: path.join(local, 'Google/Chrome/User Data'), family: 'chromium' as const },
@@ -14,32 +21,24 @@ export async function detectBrowsers(saved: Browser[]): Promise<Browser[]> {
     { name: 'Brave', suffix: 'BraveSoftware/Brave-Browser/Application/brave.exe', dataRoot: path.join(local, 'BraveSoftware/Brave-Browser/User Data'), family: 'chromium' as const },
     { name: 'Chromium', suffix: 'Chromium/Application/chrome.exe', dataRoot: path.join(local, 'Chromium/User Data'), family: 'chromium' as const }
   ];
-  const found: Browser[] = [];
-  for (const spec of specs) for (const root of [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], local]) {
-    if (!root) continue;
-    const executable = path.join(root, spec.suffix);
-    if (await exists(executable)) found.push({ id: browserId(executable), name: spec.name, executable, family: spec.family, dataRoot: spec.dataRoot, unpackedExtensions: spec.name === 'Chromium' });
-  }
-  const command = (await defaultBrowserCommand()).toLowerCase();
-  const unique = new Map<string, Browser>();
-  for (const browser of [...saved, ...found]) unique.set(browser.id, { ...browser, isDefault: command.includes(browser.executable.toLowerCase()) });
-  return [...unique.values()];
+  const candidates = specs.flatMap(spec => [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], local].filter(Boolean).map(root => ({ spec, executable: path.join(root!, spec.suffix) })));
+  const [present, command] = await Promise.all([Promise.all(candidates.map(c => exists(c.executable))), defaultBrowserCommand()]);
+  const found: Browser[] = candidates.filter((_, i) => present[i]).map(({ spec, executable }) => ({ id: browserId(executable), name: spec.name, executable, family: spec.family, dataRoot: spec.dataRoot, unpackedExtensions: spec.name === 'Chromium' }));
+  return { found, command: command.toLowerCase() };
 }
 export async function discoverProfiles(browsers: Browser[]): Promise<Candidate[]> {
-  const result: Candidate[] = [];
-  for (const browser of browsers) {
-    if (!browser.dataRoot) continue;
+  const perBrowser = await Promise.all(browsers.map(async browser => {
+    const result: Candidate[] = [];
+    if (!browser.dataRoot) return result;
     try {
-      {
-        const state = JSON.parse(await fs.readFile(path.join(browser.dataRoot, 'Local State'), 'utf8'));
-        for (const [dir, info] of Object.entries(state.profile?.info_cache || {})) {
-          if (path.basename(dir) !== dir || dir === '..' || !await exists(path.join(browser.dataRoot, dir))) continue;
-          result.push({ key: `${browser.id}:${dir}`, name: String((info as any).name || dir), browserId: browser.id, dataDir: browser.dataRoot, profileDir: dir });
-        }
-      }
+      const state = JSON.parse(await fs.readFile(path.join(browser.dataRoot, 'Local State'), 'utf8'));
+      const entries = Object.entries(state.profile?.info_cache || {}).filter(([dir]) => path.basename(dir) === dir && dir !== '..');
+      const present = await Promise.all(entries.map(([dir]) => exists(path.join(browser.dataRoot!, dir))));
+      entries.forEach(([dir, info], i) => { if (present[i]) result.push({ key: `${browser.id}:${dir}`, name: String((info as any).name || dir), browserId: browser.id, dataDir: browser.dataRoot!, profileDir: dir }); });
     } catch { /* Browser may not have been started or its metadata may be unavailable. */ }
-  }
-  return result;
+    return result;
+  }));
+  return perBrowser.flat();
 }
 export function validateFlags(flags: string[]) {
   for (const flag of flags) {

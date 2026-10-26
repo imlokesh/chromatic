@@ -6,13 +6,13 @@ import { LaunchQueue, spawnBrowser } from './launch';
 import { progressNotifier } from '../shared/performance';
 import { z } from 'zod';
 import { Store, draftSchema, referenceSchema, requireProfile, settingsSchema, visibleProfiles, proxySchema, labelList } from './store';
-import { browserId, canonical, detectBrowsers, discoverProfiles, exists, launchArgs, validateFlags } from './browsers';
-import { Cleaner, browserClosed, noLinks } from './cleanup';
+import { browserId, canonical, discoverProfiles, exists, installedBrowsers, launchArgs, mergeBrowsers, validateFlags } from './browsers';
+import { Cleaner, browserClosed, closureMonitor, noLinks } from './cleanup';
 import { PinGate } from './security';
-import { processes } from './windows';
+import { dataDirInUse, processes } from './windows';
 import { duplicateProfile, forkProfile, scanProfileStorage } from './profile-data';
 import { createBridge, protectProxy, revealProxy, testProxy } from './proxy';
-import type { Candidate, Profile, Snapshot, Operation } from '../shared/types';
+import type { Browser, Candidate, Profile, Snapshot, Operation } from '../shared/types';
 
 const root = path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'Chromatic');
 app.setPath('userData', root);
@@ -24,7 +24,8 @@ const uuid = z.string().uuid(); const idsSchema = z.array(uuid).max(1000);
 class LaunchError extends Error { constructor(public code: string, message: string, public profileId: string) { super(message); } }
 const operations = new Map<string, { value: Operation; controller: AbortController; fromLauncher?: boolean }>();
 const launchQueue = new LaunchQueue();
-const launched = new Map<string, { config: string; bridge?: Awaited<ReturnType<typeof createBridge>> }>();
+const launched = new Map<string, { config: string; spawnedAt: number; bridge?: Awaited<ReturnType<typeof createBridge>> }>();
+let browsersReady: Promise<void> = Promise.resolve();
 function beginOperation(type: Operation['type'], profileIds: string[], work: (o: Operation, signal: AbortSignal) => Promise<void>) {
   for (const [id, op] of operations) if (op.value.status !== 'running' && operations.size >= 30) operations.delete(id);
   const value: Operation = { id: randomUUID(), type, profileIds, status: 'running', done: 0, total: 0, message: 'Preparing…' };
@@ -36,8 +37,16 @@ function cancelPrivateOperations() { for (const o of operations.values()) if (o.
 function publicProfile(p: Profile): Profile { return { ...p, proxy: { ...p.proxy, hasPassword: !!store.state.proxySecrets[p.id] } }; }
 const asset = (name: string) => path.join(app.getAppPath(), 'assets', name);
 const changed = () => { for (const window of BrowserWindow.getAllWindows()) window.webContents.send('changed'); };
-const operationChanges = progressNotifier(() => { if (manager && !manager.isDestroyed()) manager.webContents.send('changed'); });
-function lock() { gate.lock(); cancelPrivateOperations(); cleaner.invalidate(); changed(); }
+const refreshWindow = (window?: BrowserWindow) => { if (window && !window.isDestroyed()) window.webContents.send('changed'); };
+// Progress only changes operations, so the manager rereads those instead of every profile.
+const operationChanges = progressNotifier(() => { if (manager && !manager.isDestroyed()) manager.webContents.send('operations'); });
+function visibleOperations(isLauncher: boolean) {
+  if (isLauncher) return [];
+  const profiles = new Map(store.state.profiles.map(p => [p.id, p]));
+  return [...operations.values()].map(o => o.value).filter(o => o.profileIds.every(id => { const p = profiles.get(id); return p && (!p.hidden || gate.unlocked); }) || !o.profileIds.length);
+}
+// Record the lock so the idle-expiry watcher doesn't repeat this work and refresh again.
+function lock() { gate.lock(); wasUnlocked = false; cancelPrivateOperations(); cleaner.invalidate(); changed(); }
 function profile(id: unknown) { return requireProfile(store.state.profiles, uuid.parse(id), gate.unlocked); }
 function browserFor(p: Profile) { const b = store.state.browsers.find(b => b.id === p.browserId); if (!b) throw new Error('Choose an installed browser for this profile.'); return b; }
 function sameLocation(a: Pick<Profile, 'dataDir' | 'profileDir'>, b: Pick<Profile, 'dataDir' | 'profileDir'>) { return canonical(a.dataDir) === canonical(b.dataDir) && (a.profileDir || 'Default') === (b.profileDir || 'Default'); }
@@ -58,14 +67,21 @@ function createWindow(mode: 'manager' | 'launcher') {
 function showManager(id?: string) {
   if (id) { profile(id); pending = { action: 'edit', id }; }
   if (!manager || manager.isDestroyed()) manager = createWindow('manager');
-  if (manager.isMinimized()) manager.restore(); manager.show(); manager.focus(); changed();
+  if (manager.isMinimized()) manager.restore(); manager.show(); manager.focus(); refreshWindow(manager);
 }
+// Created hidden ahead of time so the first shortcut press doesn't wait for a new renderer.
+function prepareLauncher() { if (!launcher || launcher.isDestroyed()) launcher = createWindow('launcher'); return launcher; }
 function showLauncher() {
-  if (!launcher || launcher.isDestroyed()) launcher = createWindow('launcher');
-  if (launcher.isVisible()) { launcher.hide(); return; }
+  const quick = prepareLauncher();
+  if (quick.isVisible()) { quick.hide(); return; }
   const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
-  const [width] = launcher.getSize(); launcher.setPosition(Math.round(area.x + (area.width - width) / 2), Math.round(area.y + area.height * .2));
-  launcher.show(); launcher.focus(); changed();
+  const [width] = quick.getSize(); quick.setPosition(Math.round(area.x + (area.width - width) / 2), Math.round(area.y + area.height * .2));
+  quick.show(); quick.focus(); refreshWindow(quick);
+}
+async function refreshBrowsers() {
+  const installed = await installedBrowsers(); const before = JSON.stringify(store.state.browsers);
+  store.state.browsers = mergeBrowsers(store.state.browsers, installed);
+  if (JSON.stringify(store.state.browsers) !== before) { await store.persist(); changed(); }
 }
 function registerHotkey() {
   globalShortcut.unregisterAll(); hotkeyError = undefined;
@@ -107,7 +123,17 @@ async function launch(id: string, fromLauncher = false) {
 function ensureLaunchAllowed() {
   if (cleaner.busy.size || [...operations.values()].some(o => o.value.type === 'fork' && o.value.status === 'running')) throw new Error('Wait for cache cleanup or copying to finish before launching a browser.');
 }
+// The lockfile answers in about a millisecond, where a process query takes seconds. A browser
+// Chromatic started moments ago may not have created it yet (Brave needed ~550 ms), and an
+// unreadable lock is uncertain, so those cases still read process command lines.
+async function dataDirRunning(b: Pick<Browser, 'executable'>, p: Profile, recentlySpawned: boolean) {
+  const locked = await dataDirInUse(p.dataDir);
+  if (locked === true || (locked === false && !recentlySpawned)) return locked;
+  const running = await processes(path.basename(b.executable));
+  return running.some(proc => !proc.CommandLine || proc.CommandLine.toLowerCase().includes(canonical(p.dataDir)) || (p.kind === 'existing' && !proc.CommandLine.includes('--user-data-dir')));
+}
 async function performLaunch(id: string, signal: AbortSignal, earlyFailure: (error: Error) => void) {
+  await browsersReady;
   signal.throwIfAborted();
   const p = structuredClone(profile(id)); const b = structuredClone(browserFor(p));
   const settings = structuredClone(store.state.settings);
@@ -120,10 +146,9 @@ async function performLaunch(id: string, signal: AbortSignal, earlyFailure: (err
   }
   // Reject invalid arguments before allocating a proxy bridge.
   launchArgs(b, p, settings);
-  const running = await processes(path.basename(b.executable));
-  const runningHere = running.some(proc => !proc.CommandLine || proc.CommandLine.toLowerCase().includes(canonical(p.dataDir)) || (p.kind === 'existing' && !proc.CommandLine.includes('--user-data-dir')));
   const key = canonical(p.dataDir); const config = JSON.stringify([p.flags, p.noDefaultFlags, settings.defaultFlags, p.proxy, secret]);
   const current = launched.get(key);
+  const runningHere = await dataDirRunning(b, p, !!current && Date.now() - current.spawnedAt < 15_000);
   if (runningHere && (!current || current.config !== config)) throw new LaunchError('restart', 'This browser data folder is already in use. Close its browser windows and background processes, then launch again to apply these settings.', p.id);
   let bridge = current?.bridge;
   let createdBridge: Awaited<ReturnType<typeof createBridge>> | undefined;
@@ -144,7 +169,7 @@ async function performLaunch(id: string, signal: AbortSignal, earlyFailure: (err
     ensureLaunchAllowed();
     await spawnBrowser(b.executable, launchArgs(b, p, settings, bridge?.endpoint), earlyFailure);
     spawned = true;
-    launched.set(key, { config, bridge });
+    launched.set(key, { config, bridge, spawnedAt: Date.now() });
     const registered = store.state.profiles.find(item => item.id === id);
     if (registered) registered.lastUsed = Date.now();
     changed();
@@ -170,14 +195,18 @@ async function handleFileArgs(args: string[]) {
   } catch (error: any) { dialog.showErrorBox('Unable to open profile', error.message); }
 }
 
+function snapshot(isLauncher: boolean): Snapshot {
+  return { profiles: visibleProfiles(store.state.profiles, gate.unlocked, isLauncher).map(publicProfile), browsers: store.state.browsers,
+    settings: store.state.settings, unlocked: gate.unlocked, hasPin: Boolean(store.state.pin), hotkeyError,
+    pending: isLauncher ? undefined : pending, version: app.getVersion(), operations: visibleOperations(isLauncher) };
+}
 async function dispatch(sender: Electron.WebContents, method: string, args: unknown[]) {
   const isLauncher = sender === launcher?.webContents;
-  if (method === 'snapshot') {
-    const result: Snapshot = { profiles: visibleProfiles(store.state.profiles, gate.unlocked, isLauncher).map(publicProfile), browsers: store.state.browsers,
-      settings: store.state.settings, unlocked: gate.unlocked, hasPin: Boolean(store.state.pin), hotkeyError,
-      pending: isLauncher ? undefined : pending, version: app.getVersion(), operations: isLauncher ? [] : [...operations.values()].map(o => o.value).filter(o => o.profileIds.every(id => { const p = store.state.profiles.find(p => p.id === id); return p && (!p.hidden || gate.unlocked); }) || !o.profileIds.length) };
-    return result;
-  }
+  if (method === 'snapshot') return snapshot(isLauncher);
+  // Text replies are parsed in the page. Copying the object through the context bridge cost
+  // ~14 ms per 1,000 profiles; a string costs ~4 ms including JSON.parse.
+  if (method === 'snapshotText') return JSON.stringify(snapshot(isLauncher));
+  if (method === 'operationsText') return JSON.stringify(visibleOperations(isLauncher));
   if (method === 'launch') return launch(uuid.parse(args[0]), isLauncher);
   if (method === 'launcher') { showLauncher(); return; }
   if (method === 'clearPending') { pending = undefined; return; }
@@ -198,12 +227,16 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
     if (mode === 'fork' && launchQueue.hasRoot(canonical(source.dataDir))) throw new Error('Wait for this browser launch to finish before copying its data.');
     const target = duplicateProfile(source, root, name); const browser = browserFor(source); const secret = store.state.proxySecrets[source.id];
     return beginOperation(mode, [source.id], async (o, signal) => {
-      let lastCheck = 0;
-      const check = async () => { signal.throwIfAborted(); profile(source.id); if (Date.now() - lastCheck > 750) { await browserClosed(browser); lastCheck = Date.now(); } };
+      // Closure is confirmed before anything is read, then rechecked in the background while
+      // copying, and once more after the final source verification before publishing.
+      let monitor: ReturnType<typeof closureMonitor> | undefined;
+      const check = async () => { signal.throwIfAborted(); profile(source.id); monitor?.check(); };
       try {
       if (mode === 'fork') {
         o.message = 'Copying persistent browser data…';
-        await forkProfile(source, target, check, (done, total) => { o.done = done; o.total = total; operationChanges.progress(); });
+        await check(); await browserClosed(browser);
+        monitor = closureMonitor(notBefore => browserClosed(browser, notBefore));
+        await forkProfile(source, target, check, (done, total) => { o.done = done; o.total = total; operationChanges.progress(); }, () => monitor!.settle());
       }
       signal.throwIfAborted(); profile(source.id);
       store.state.profiles.push(target); if (secret) store.state.proxySecrets[target.id] = secret;
@@ -215,13 +248,15 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
           await noLinks(target.dataDir); await fs.rm(target.dataDir, { recursive: true, force: true });
         }
         throw e;
-      }
+      } finally { monitor?.stop(); }
       changed(); o.resultId = target.id; o.message = mode === 'fork' ? 'Fork ready. Browser data was copied; some sites may ask you to sign in again.' : 'Duplicate ready. Its browser data starts empty.';
     });
   }
   if (method === 'cancelOperation') { const o = operations.get(uuid.parse(args[0])); if (o && o.value.type !== 'launch') { for (const id of o.value.profileIds) profile(id); o.controller.abort(); } return; }
   if (method === 'scanStorage') {
     const profiles = [...new Set(idsSchema.parse(args[0]))].map(id => structuredClone(profile(id)));
+    // Only the latest scan is shown; older results would otherwise ride along in every snapshot.
+    for (const [key, op] of operations) if (op.value.type === 'storage' && op.value.status !== 'running') operations.delete(key);
     return beginOperation('storage', profiles.map(p => p.id), async (o, signal) => { o.total = profiles.length; o.storage = []; for (const p of profiles) { const check = () => { signal.throwIfAborted(); profile(p.id); }; check(); o.message = 'Measuring profile data…'; const row = await scanProfileStorage(p, check); check(); o.storage.push(row); o.done++; operationChanges.progress(); } o.message = 'Storage scan complete. Sizes are estimates while browsers are running.'; });
   }
   if (method === 'testProxy') {
@@ -263,7 +298,7 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
   }
   if (method === 'remove') { const p = profile(args[0]); if (cleaner.busy.has(p.id) || [...operations.values()].some(o => o.value.status === 'running' && o.value.profileIds.includes(p.id))) throw new Error('Wait for the current profile operation to finish.'); delete store.state.proxySecrets[p.id]; store.state.profiles = store.state.profiles.filter(x => x.id !== p.id); cleaner.invalidate(p.id); await store.persist(); changed(); return; }
   if (method === 'discover') {
-    store.state.browsers = await detectBrowsers(store.state.browsers); await store.persist();
+    const installed = await installedBrowsers(); store.state.browsers = mergeBrowsers(store.state.browsers, installed); await store.persist();
     discovered = (await discoverProfiles(store.state.browsers)).filter(c => !store.state.profiles.some(p => sameLocation(p, c)));
     changed(); return discovered;
   }
@@ -296,7 +331,11 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
     }
     return count;
   }
-  if (method === 'previewSlim') { const profiles = idsSchema.parse(args[0]).map(id => profile(id)); const previews = []; for (const p of profiles) previews.push(await cleaner.preview(p, browserFor(p))); for (const p of profiles) profile(p.id); return previews; }
+  if (method === 'previewSlim') {
+    const profiles = idsSchema.parse(args[0]).map(id => profile(id)); const browsers = profiles.map(browserFor);
+    // Concurrent previews share one process query per browser instead of one each.
+    const previews = await Promise.all(profiles.map((p, i) => cleaner.preview(p, browsers[i]))); for (const p of profiles) profile(p.id); return previews;
+  }
   if (method === 'clean') {
     if ([...operations.values()].some(o => o.value.type === 'fork' && o.value.status === 'running')) throw new Error('Wait for the fork to finish before clearing cache.');
     const tokens = idsSchema.parse(args[0]); const results = []; const checkedIds: string[] = [];
@@ -317,8 +356,10 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', (_event, args) => { void handleFileArgs(args); });
   app.whenReady().then(async () => {
-    await store.load(); store.state.browsers = await detectBrowsers(store.state.browsers); await store.persist();
+    await store.load();
     nativeTheme.themeSource = store.state.settings.theme;
+    // Saved browsers are usable at once; detection finishes in the background and refreshes the windows.
+    browsersReady = refreshBrowsers().catch(() => {});
     ipcMain.handle('chromatic', async (event, method, ...args) => {
       if (![manager?.webContents, launcher?.webContents].includes(event.sender) || event.senderFrame !== event.sender.mainFrame) return { ok: false, error: 'Untrusted caller.' };
       try { return { ok: true, value: await dispatch(event.sender, method, args) }; }
@@ -331,6 +372,8 @@ else {
     powerMonitor.on('lock-screen', lock); powerMonitor.on('suspend', lock);
     setInterval(() => { if (wasUnlocked && !gate.unlocked) { cancelPrivateOperations(); cleaner.invalidate(); changed(); } wasUnlocked = gate.unlocked; }, 1000).unref();
     if (!process.argv.includes('--background')) await handleFileArgs(process.argv);
+    // Leave startup to the manager, then warm the launcher.
+    setTimeout(prepareLauncher, 1500).unref();
   }).catch(error => { dialog.showErrorBox('Chromatic could not start', error.message); app.quit(); });
 }
 app.on('before-quit', event => {

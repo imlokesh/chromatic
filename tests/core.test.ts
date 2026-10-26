@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { cacheTargets, Cleaner, noLinks } from '../electron/cleanup';
+import { cacheTargets, Cleaner, closureMonitor, noLinks } from '../electron/cleanup';
 import { launchArgs, validateFlags } from '../electron/browsers';
 import { PinGate } from '../electron/security';
 import { referenceSchema, requireProfile, Store, visibleProfiles } from '../electron/store';
@@ -41,9 +41,60 @@ describe('cache slimming preserves persistent data', () => {
   it('rechecks running state after preview before deletion', async () => { const dir = await tmp(); await fs.mkdir(path.join(dir, 'Default/Cache'), { recursive: true }); const file = path.join(dir, 'Default/Cache/keep'); await fs.writeFile(file, 'keep'); let running = false; const cleaner = new Cleaner(async () => { if (running) throw new Error('running'); }); const preview = await cleaner.preview(profile(dir), chromium); running = true; expect((await cleaner.clean(preview.token)).reclaimed).toBe(0); expect(await fs.readFile(file, 'utf8')).toBe('keep'); });
   it('skips files changed after preview', async () => { const dir = await tmp(); await fs.mkdir(path.join(dir, 'Default/Cache'), { recursive: true }); const file = path.join(dir, 'Default/Cache/data'); await fs.writeFile(file, 'old'); const cleaner = new Cleaner(async () => {}); const p = await cleaner.preview(profile(dir), chromium); await fs.writeFile(file, 'new and larger'); expect((await cleaner.clean(p.token)).skipped).toBe(1); expect(await fs.readFile(file, 'utf8')).toBe('new and larger'); });
   it('does not follow a junction outside the selected profile', async () => { const dir = await tmp(); const outside = await tmp(); await fs.mkdir(path.join(dir, 'Default'), { recursive: true }); await fs.writeFile(path.join(outside, 'keep'), 'outside'); await fs.symlink(outside, path.join(dir, 'Default/Cache'), 'junction'); const p = await new Cleaner(async () => {}).preview(profile(dir), chromium); expect(p.skipped).toMatch(/Linked/); expect(await fs.readFile(path.join(outside, 'keep'), 'utf8')).toBe('outside'); });
+  it('detects a link anywhere on the path, not only at the last component', async () => {
+    const dir = await tmp(); const outside = await tmp(); await fs.mkdir(path.join(outside, 'Default/Cache'), { recursive: true });
+    await fs.symlink(outside, path.join(dir, 'linked'), 'junction');
+    await expect(noLinks(path.join(dir, 'linked', 'Default', 'Cache'))).rejects.toThrow('Linked');
+    await expect(noLinks(path.join(outside, 'Default', 'Cache'))).resolves.toBeUndefined();
+    await expect(noLinks(path.join(dir, 'missing'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const p = await new Cleaner(async () => {}).preview(profile(path.join(dir, 'linked')), chromium); expect(p.skipped).toMatch(/Linked/);
+  });
+  it('stops deleting when the browser starts during cleanup', async () => {
+    const dir = await tmp(); await fs.mkdir(path.join(dir, 'Default/Cache'), { recursive: true });
+    for (let i = 0; i < 400; i++) await fs.writeFile(path.join(dir, `Default/Cache/f${i}`), 'x');
+    let calls = 0; const cleaner = new Cleaner(async () => { if (++calls > 2) throw new Error('Browser started'); });
+    const preview = await cleaner.preview(profile(dir), chromium);
+    const slowUnlink = fs.unlink; const unlink = vi.spyOn(fs, 'unlink').mockImplementation(async file => { await new Promise(r => setTimeout(r, 25)); return slowUnlink(file); });
+    const result = await cleaner.clean(preview.token); unlink.mockRestore();
+    expect(result.message).toBe('Browser started'); expect(result.removed).toBeGreaterThan(0); expect(result.removed).toBeLessThan(400);
+    expect(result.removed + result.skipped).toBe(400); expect((await fs.readdir(path.join(dir, 'Default/Cache'))).length).toBe(400 - result.removed);
+  });
   it('refuses traversal profile paths and expired cleanup plans', async () => { expect(() => cacheTargets(profile('C:\\x', { profileDir: '..' }), chromium)).toThrow(); const dir = await tmp(); const cleaner = new Cleaner(async () => {}); const p = await cleaner.preview(profile(dir), chromium); vi.useFakeTimers(); vi.setSystemTime(Date.now() + 301_000); await expect(cleaner.clean(p.token)).rejects.toThrow('expired'); });
 });
+describe('browser closure monitor', () => {
+  it('reports a background failure through check() without blocking callers', async () => {
+    let running = false; let queries = 0;
+    const monitor = closureMonitor(async () => { queries++; if (running) throw new Error('Browser running'); }, 5);
+    await new Promise(r => setTimeout(r, 30)); expect(() => monitor.check()).not.toThrow(); expect(queries).toBeGreaterThan(0);
+    running = true; await new Promise(r => setTimeout(r, 30)); expect(() => monitor.check()).toThrow('Browser running');
+    await expect(monitor.settle()).rejects.toThrow('Browser running');
+  });
+  it('settles with a confirmation that started after the guarded work', async () => {
+    const seen: number[] = []; const monitor = closureMonitor(async notBefore => { seen.push(notBefore); }, 5);
+    await new Promise(r => setTimeout(r, 20)); const finished = Date.now();
+    await monitor.settle(); expect(seen.at(-1)).toBeGreaterThanOrEqual(finished);
+    const count = seen.length; await new Promise(r => setTimeout(r, 30)); expect(seen.length).toBe(count);
+  });
+  it('fails settle when the final confirmation fails', async () => {
+    const monitor = closureMonitor(async notBefore => { if (notBefore) throw new Error('Started at the end'); }, 1000);
+    await expect(monitor.settle()).rejects.toThrow('Started at the end');
+  });
+});
 describe('PIN and storage', () => {
+  it('saves changed profiles and still refuses state that could not load again', async () => {
+    const store = new Store(await tmp()); await store.load();
+    const a = profile('C:\\a', { labels: ['Work', 'work'] }), b = profile('C:\\b');
+    store.state.profiles = [a, b]; await store.persist();
+    let saved = JSON.parse(await fs.readFile(path.join(store.root, 'settings.json'), 'utf8'));
+    expect(saved.profiles[0].labels).toEqual(['work']); expect(saved.profiles[1].name).toBe('Test profile');
+    b.name = 'Renamed'; b.lastUsed = 5; await store.persist();
+    saved = JSON.parse(await fs.readFile(path.join(store.root, 'settings.json'), 'utf8'));
+    expect(saved.profiles[1]).toMatchObject({ name: 'Renamed', lastUsed: 5 }); expect(saved.profiles[0].labels).toEqual(['work']);
+    (b as any).color = 'red'; expect(() => store.persist()).toThrow();
+    b.color = '#123456'; store.state.settings.theme = 'neon' as any; expect(() => store.persist()).toThrow();
+    store.state.settings.theme = 'dark'; await store.persist();
+    const reloaded = new Store(store.root); await reloaded.load(); expect(reloaded.state.profiles.map(p => p.color)).toEqual(['#8070c6', '#123456']);
+  });
   const protector = { encryptString: (s: string) => Buffer.from(s), decryptString: (b: Buffer) => b.toString(), isEncryptionAvailable: () => true };
   it('requires exactly four digits, enforces persistent delays, and expires on idle', async () => {
     const store = new Store(await tmp()); await store.load(); const gate = new PinGate(store, protector);
