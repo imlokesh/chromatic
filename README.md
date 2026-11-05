@@ -1,8 +1,15 @@
 # Chromatic
 
-A Windows launcher for Chromium-based browser profiles, built with Electron, TypeScript, and React.
+A browser profile manager and launcher for Windows. Keep separate Chrome, Edge, Brave and Chromium profiles for work, clients and personal browsing, and open any of them from a global hotkey. Each profile can have its own proxy, labels and startup pages. Hidden profiles are behind a PIN, and you can fork profiles and clean their caches safely. Built with Electron, TypeScript and React.
 
-![Chromatic icon](assets/icon.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/manager-dark.png">
+  <img src="docs/screenshots/manager.png" alt="Chromatic profile manager listing Chrome, Edge and Brave profiles with labels, favorites and launch buttons" width="820">
+</picture>
+
+Press **Ctrl+Alt+Space** anywhere to search and launch a profile:
+
+<img src="docs/screenshots/launcher.png" alt="Chromatic quick launcher searching profiles by name and label" width="520">
 
 ## Install
 
@@ -61,7 +68,7 @@ node scripts/proxy-live-smoke.cjs
 npm run package
 ```
 
-Electron/browser tests use disposable profiles, never real user data. The live proxy test contacts ipify through a local authenticated fixture; other proxy tests use local servers. `tests/localhost-{cert,key}.pem` are public self-signed localhost test fixtures, not production credentials. Screenshots go in ignored `artifacts/`. Set `CHROMATIC_SMOKE_EXE` to an installed executable to test that package with the Electron smoke scripts.
+Electron/browser tests use disposable profiles, never real user data. The live proxy test contacts ipify through a local authenticated fixture; other proxy tests use local servers. `tests/localhost-{cert,key}.pem` are public self-signed localhost test fixtures, not production credentials. Screenshots go in ignored `artifacts/`. The README images in `docs/screenshots/` come from `node scripts/readme-screenshots.cjs`, which uses invented demo profiles. Close any running Chromatic first so its hotkey doesn't clash. Set `CHROMATIC_SMOKE_EXE` to an installed executable to test that package with the Electron smoke scripts.
 
 The performance suite runs the development build with 1,000 profiles, delayed in-use checks, simulated browser failures, and a many-file fork. It measures launcher opening and dismissal, checks that long lists render in pages and still reach every profile, and exercises background launch recovery without starting real browsers. The launch browser test starts a real headless Chrome or Edge through Chromatic with a disposable profile to verify running-folder detection.
 
