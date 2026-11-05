@@ -11,7 +11,7 @@ import { Cleaner, browserClosed, closureMonitor, noLinks } from './cleanup';
 import { PinGate } from './security';
 import { dataDirInUse, processes } from './windows';
 import { duplicateProfile, forkProfile, scanProfileStorage } from './profile-data';
-import { createBridge, protectProxy, revealProxy, testProxy } from './proxy';
+import { createBridge, protectProxy, requireFreshPassword, revealProxy, testProxy } from './proxy';
 import type { Browser, Candidate, Profile, Snapshot, Operation } from '../shared/types';
 
 const root = path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'Chromatic');
@@ -56,7 +56,7 @@ function createWindow(mode: 'manager' | 'launcher') {
   const window = new BrowserWindow({ width: quick ? 690 : 1180, height: quick ? 520 : 790, minWidth: quick ? 590 : 900, minHeight: quick ? 420 : 600,
     show: false, frame: !quick, resizable: !quick, alwaysOnTop: quick, skipTaskbar: quick,
     title: 'Chromatic', backgroundColor: nativeTheme.shouldUseDarkColors ? '#1d1d24' : '#f7f6f2', icon: asset('icon.ico'), autoHideMenuBar: true,
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true } });
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, devTools: !app.isPackaged } });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', e => e.preventDefault());
   window.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'), { query: { mode } });
@@ -64,6 +64,9 @@ function createWindow(mode: 'manager' | 'launcher') {
   else window.on('close', event => { if (!quitting) { event.preventDefault(); window.hide(); pending = undefined; lock(); } });
   return window;
 }
+// Rewritten on every start so the Windows entry follows the saved choice even after a reinstall or move.
+// Unpackaged runs would register the bare Electron binary, so only installed builds touch it.
+function syncLoginItem() { if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: store.state.settings.startup, args: ['--background'] }); }
 function showManager(id?: string) {
   if (id) { profile(id); pending = { action: 'edit', id }; }
   if (!manager || manager.isDestroyed()) manager = createWindow('manager');
@@ -261,6 +264,7 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
   }
   if (method === 'testProxy') {
     const proxy = proxySchema.parse(args[0]); const p = args[1] ? profile(args[1]) : undefined;
+    if (p) requireFreshPassword(proxy, p.proxy, store.state.proxySecrets[p.id]);
     const password = proxy.clearPassword ? '' : proxy.password || revealProxy(p ? store.state.proxySecrets[p.id] : undefined, safeStorage);
     return beginOperation('proxy', p ? [p.id] : [], async (o, signal) => { o.message = 'Checking connection through the proxy…'; o.proxyResult = await testProxy(proxy, password, signal); if (p) profile(p.id); o.message = 'Proxy connected.'; });
   }
@@ -288,7 +292,7 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
     if (!old && draft.kind === 'managed' && await exists(dataDir) && (await fs.readdir(dataDir)).length) throw new Error('Choose an empty folder for a new isolated profile, or add it as an existing profile.');
     const p: Profile = { ...draft, id, dataDir, createdAt: old?.createdAt || Date.now(), lastUsed: old?.lastUsed };
     if (store.state.profiles.some(other => other.id !== p.id && sameLocation(other, p))) throw new Error('This browser data location is already registered.');
-    const protectedProxy = protectProxy(draft.proxy, old ? store.state.proxySecrets[old.id] : undefined, safeStorage);
+    const protectedProxy = protectProxy(draft.proxy, old ? store.state.proxySecrets[old.id] : undefined, safeStorage, old?.proxy);
     p.proxy = protectedProxy.proxy;
     launchArgs(b, { ...p, proxy: { ...p.proxy, mode: p.proxy.mode === 'review' ? 'system' : p.proxy.mode } }, store.state.settings);
     if (cleaner.busy.has(id)) throw new Error('Wait for slimming to finish before editing this profile.');
@@ -346,7 +350,7 @@ async function dispatch(sender: Electron.WebContents, method: string, args: unkn
   if (method === 'settings') {
     const settings = settingsSchema.parse(args[0]); validateFlags(settings.defaultFlags.chromium); 
     store.state.settings = settings; nativeTheme.themeSource = settings.theme;
-    app.setLoginItemSettings({ openAtLogin: settings.startup, args: ['--background'] });
+    syncLoginItem();
     registerHotkey(); await store.persist(); changed(); return;
   }
   throw new Error('Unknown operation.');
@@ -357,7 +361,7 @@ else {
   app.on('second-instance', (_event, args) => { void handleFileArgs(args); });
   app.whenReady().then(async () => {
     await store.load();
-    nativeTheme.themeSource = store.state.settings.theme;
+    nativeTheme.themeSource = store.state.settings.theme; syncLoginItem();
     // Saved browsers are usable at once; detection finishes in the background and refreshes the windows.
     browsersReady = refreshBrowsers().catch(() => {});
     ipcMain.handle('chromatic', async (event, method, ...args) => {

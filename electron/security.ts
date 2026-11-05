@@ -5,12 +5,15 @@ const scrypt = promisify(scryptCallback);
 interface Protector { encryptString(value: string): Buffer; decryptString(value: Buffer): string; isEncryptionAvailable(): boolean }
 export class PinGate {
   private until = 0;
+  // Attempts run one at a time; parallel calls would all pass the lockout check before any failed.
+  private attempts: Promise<unknown> = Promise.resolve();
   constructor(private store: Store, private protector: Protector) {}
   get unlocked() { return this.until > Date.now(); }
   activity() { if (this.unlocked) this.until = Date.now() + 5 * 60_000; }
   lock() { this.until = 0; }
   private validate(pin: string) { if (!/^\d{4}$/.test(pin)) throw new Error('Enter exactly four digits.'); }
-  async unlock(pin: string) {
+  unlock(pin: string) { const run = this.attempts.then(() => this.attempt(pin)); this.attempts = run.catch(() => {}); return run; }
+  private async attempt(pin: string) {
     this.validate(pin);
     if (!this.store.state.pin) throw new Error('Set a PIN before hiding profiles.');
     if (this.store.state.blockedUntil > Date.now()) throw new Error(`Try again in ${Math.ceil((this.store.state.blockedUntil - Date.now()) / 1000)} seconds.`);

@@ -22,7 +22,7 @@ const stateSchema = z.object({ version: z.literal(2), profiles: z.array(profileS
   proxySecrets: z.record(z.string()).default({}), pin: z.string().optional(), attempts: z.number().default(0), blockedUntil: z.number().default(0) });
 export type State = z.infer<typeof stateSchema>;
 export class Store {
-  state: State = { version: 2, profiles: [], proxySecrets: {}, browsers: [], attempts: 0, blockedUntil: 0, settings: { hotkey: 'Ctrl+Alt+Space', startup: false, theme: 'system', defaultFlags: { chromium: ['--no-first-run', '--no-default-browser-check'] }, groupBy: 'none', sortBy: 'favorites' } };
+  state: State = { version: 2, profiles: [], proxySecrets: {}, browsers: [], attempts: 0, blockedUntil: 0, settings: { hotkey: 'Ctrl+Alt+Space', startup: true, theme: 'system', defaultFlags: { chromium: ['--no-first-run', '--no-default-browser-check'] }, groupBy: 'none', sortBy: 'favorites' } };
   private queue: Promise<void> = Promise.resolve();
   // Validated output keyed by profile id and its serialized input. Revalidating 1,000
   // unchanged profiles took ~13 ms of main-process time on every save.

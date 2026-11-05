@@ -6,9 +6,11 @@ A Windows launcher for Chromium-based browser profiles, built with Electron, Typ
 
 ## Install
 
-Download **Chromatic.Setup.0.2.2.exe** from the [private release page](https://github.com/imlokesh/chromatic/releases/tag/v0.2.2). Sign in with an account that has repository access. The per-user installer registers `.chromatic` references and their **Open** and **Edit profile** Explorer actions. On Windows 11, Edit profile may be under **Show more options**.
+Download the latest **Chromatic.Setup.<version>.exe** from the [releases page](https://github.com/imlokesh/chromatic/releases/latest). The per-user installer registers `.chromatic` references and their **Open** and **Edit profile** Explorer actions. On Windows 11, Edit profile may be under **Show more options**.
 
 The build is unsigned; Windows may show an unknown publisher. Install new releases over the existing version. There is no automatic updater. Uninstalling preserves browser data and app settings.
+
+Chromatic starts minimized to the tray when you sign in to Windows. Turn this off in **Settings → Launcher**.
 
 ## Everyday use
 

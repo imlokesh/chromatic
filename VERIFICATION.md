@@ -1,5 +1,13 @@
 # v0.2.0 verification
 
+## 0.2.3 sign-in startup and security update — 2026-11-05
+
+- Electron upgraded from 41.10.7 (end of life) to 45.2.3, and non-breaking `npm audit fix` updates applied. `npm audit --omit=dev` still reports zod 3 (memory use while validating oversized collections). Every zod 3 version is affected, and the fix needs the zod 4 API. Zod only validates data from Chromatic's own windows, its settings file and registered profile IDs.
+- All 71 unit tests and the production build pass. New tests cover parallel PIN attempts (this test fails on 0.2.2) and requiring the proxy password again after the address changes.
+- Every Electron smoke suite passes on Electron 45 against the development build: manager, feature, performance, launch-browser, browser (Chrome and Edge) and fork-browser (Chrome and Edge). The manager, feature and launch-browser suites also pass against the packaged executable.
+- Before the repository was made public, its full git history was checked for credentials and personal data. The only key-like content is the documented self-signed localhost test fixture.
+- Development builds and smoke runs add no Windows startup entry. Only the installed app registers it.
+
 ## 0.2.2 performance update — 2026-10-26
 
 Measured on the same Windows 10 machine, before and after, with disposable data:

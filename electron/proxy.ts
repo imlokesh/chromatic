@@ -5,7 +5,13 @@ import { isIP } from 'node:net';
 import type { ProxyConfig } from '../shared/types';
 
 export interface Protector { isEncryptionAvailable(): boolean; encryptString(s: string): Buffer; decryptString(b: Buffer): string }
-export function protectProxy(input: ProxyConfig, previous: string | undefined, protector: Protector) {
+const endpoint = (p: Pick<ProxyConfig, 'protocol' | 'host' | 'port'>) => [p.protocol, p.host.trim().toLowerCase(), p.port].join(' ');
+// A saved password belongs to the server it was entered for; it must not follow the profile to a new address.
+export function requireFreshPassword(input: ProxyConfig, saved: ProxyConfig | undefined, previous: string | undefined) {
+  if (previous && saved && !input.clearPassword && !input.password && endpoint(input) !== endpoint(saved)) throw new Error('The proxy address changed. Enter its password again, or remove the saved password.');
+}
+export function protectProxy(input: ProxyConfig, previous: string | undefined, protector: Protector, saved?: ProxyConfig) {
+  requireFreshPassword(input, saved, previous);
   const { password, clearPassword, hasPassword: _, ...proxy } = input;
   let secret = clearPassword ? undefined : previous;
   if (password !== undefined && password !== '') {

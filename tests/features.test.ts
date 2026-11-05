@@ -121,6 +121,11 @@ describe('proxy forwarding', () => {
     const saved = protectProxy({ ...proxy, password: 'p@ss:word' }, undefined, protector); expect(JSON.stringify(saved.proxy)).not.toContain('p@ss'); expect(revealProxy(saved.secret, protector)).toBe('p@ss:word');
     expect(protectProxy(proxy, saved.secret, protector).secret).toBe(saved.secret); expect(protectProxy({ ...proxy, clearPassword: true }, saved.secret, protector).secret).toBeUndefined();
     expect(() => protectProxy({ ...proxy, password: 'secret' }, undefined, { ...protector, isEncryptionAvailable: () => false })).toThrow('unavailable');
+    const moved = { ...proxy, host: 'other.example' };
+    expect(() => protectProxy(moved, saved.secret, protector, proxy)).toThrow('address changed');
+    expect(protectProxy({ ...proxy, host: proxy.host.toUpperCase() }, saved.secret, protector, proxy).secret).toBe(saved.secret);
+    expect(revealProxy(protectProxy({ ...moved, password: 'new' }, saved.secret, protector, proxy).secret, protector)).toBe('new');
+    expect(protectProxy({ ...moved, clearPassword: true }, saved.secret, protector, proxy).secret).toBeUndefined();
     expect(upstreamUrl({ ...proxy, protocol: 'socks5' }, 'p@ss')).toContain('socks5h://user:p%40ss@');
     expect(() => proxySchema.parse({ ...proxy, host: 'user:pass@host' })).toThrow();
   });
